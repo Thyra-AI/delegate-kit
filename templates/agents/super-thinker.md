@@ -1,6 +1,6 @@
 ---
 name: super-thinker
-description: Top-tier pure reasoning agent. Use for the hardest, highest-stakes reasoning over context you ALREADY have — deep analysis, subtle trade-offs, intricate planning, debugging-by-reasoning, untangling a decision where getting it right matters most. Like thinker but on the strongest reasoning model for maximum depth. It has NO tools and cannot read files or run anything: you must pack every relevant fact into the prompt. Returns reasoning, a conclusion, or a plan. Do NOT use it to gather information.
+description: "Top-tier pure reasoning agent. Use for the hardest, highest-stakes reasoning over context you ALREADY have — deep analysis, subtle trade-offs, intricate planning, debugging-by-reasoning, untangling a decision where getting it right matters most. Like thinker but on the strongest reasoning model for maximum depth. It has NO tools and cannot read files or run anything: you must pack every relevant fact into the prompt. Returns reasoning, a conclusion, or a plan. Do NOT use it to gather information."
 tools: []
 model: fable
 ---

@@ -1,11 +1,13 @@
 ---
 name: subagents
-description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Five types: thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping, never dumps whole files), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work). Use when deciding how to delegate work — pick the right agent, give it the right brief. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
+description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Five types: thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping, never dumps whole files), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work). Use when deciding how to delegate work — pick the right agent, give it a brief sized to its job. Also covers fleet mechanics: pointers-not-payloads briefs for tool-having agents (packed context is for tool-less ones only), spawning fresh vs. the compounding cost of resuming via SendMessage, parallelizing independent agents, and a verification bar scaled to blast radius. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
 ---
 
 # /subagents
 
-The roster of specialized subagents you can spawn, what each is for, and how to brief it. Use this to route work to the right agent instead of defaulting to a generic one. Each is a real `subagent_type` (defined in this plugin's `agents/` directory) with its tools and model already pinned — you don't set the model, just pass `subagent_type` and a good prompt.
+The roster of specialized subagents you can spawn, what each is for, and how to brief it. Use this to route work to the right agent instead of defaulting to a generic one. Each is a real `subagent_type` (composed into `~/.claude/agents/` by `/delegate-kit:setup`) with its tools and model already pinned — you don't set the model, just pass `subagent_type` and a good prompt. Passing an explicit `model` overrides the pin and can only express coarse aliases, so it silently defeats the point; leave it off.
+
+If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run on this machine — say so rather than falling back to a generic agent.
 
 ## The roster
 
@@ -29,7 +31,7 @@ The roster of specialized subagents you can spawn, what each is for, and how to 
 
 **Do NOT use it** to gather information — it can't. If facts are missing, get them (researcher) first, then hand them to thinker.
 
-**Briefing rule — pack the context.** thinker only knows what you tell it. Put every relevant fact, constraint, code snippet, and option into the prompt. A thin brief gets thin reasoning. Ask it for a conclusion *and* the reasoning path.
+**Briefing rule — pack the context.** thinker only knows what you tell it. Put every relevant fact, constraint, code snippet, and option into the prompt. A thin brief gets thin reasoning. Ask it for a conclusion *and* the reasoning path. (This is a *no-tools* rule — it applies to thinker and super-thinker only. Agents with repo access get pointers, not payloads; see [Running the fleet](#running-the-fleet).)
 
 ## super-thinker — the top-tier reasoning engine
 
@@ -37,7 +39,7 @@ The roster of specialized subagents you can spawn, what each is for, and how to 
 
 **Use when** the reasoning is genuinely hard or the call is high-stakes and you want maximum depth: a subtle architectural trade-off, an intricate multi-factor decision, a gnarly bug you must reason out from the facts, a plan where a wrong call is expensive. When plain thinker would do, use thinker; reach for super-thinker when the extra reasoning depth is worth it.
 
-**Briefing rule — same as thinker, and it matters even more here.** super-thinker only knows what you tell it, so pack every relevant fact, constraint, snippet, and option into the prompt. The deeper the model, the more it rewards a complete brief — and the more a missing fact quietly caps the quality. Ask for a conclusion *and* the reasoning path.
+**Briefing rule — same as thinker, and it matters even more here.** super-thinker only knows what you tell it, so pack every relevant fact, constraint, snippet, and option into the prompt. The deeper the model, the more it rewards a complete brief — and the more a missing fact quietly caps the quality. Ask for a conclusion *and* the reasoning path. (Like thinker's, this is a *no-tools* rule — it does not generalize to agents that can read the repo themselves.)
 
 ## researcher — the flow mapper
 
@@ -57,7 +59,7 @@ The roster of specialized subagents you can spawn, what each is for, and how to 
 
 **The boundaries.** Versus **simple-tasks** — simple-tasks executes a known route with zero judgment and never edits code; the executer implements a *described change* and makes the normal small calls a competent engineer makes (structure, reuse, edge cases, style). Rule of thumb: if the briefing is a command list, that's simple-tasks; if it's a change description, that's executer. Versus **thinker / super-thinker** — they decide, the executer builds; it will not re-open settled architecture, and if it hits a genuinely load-bearing ambiguity it stops and bounces the question back with a recommendation instead of guessing. It **commits the work it implements** (with the message you give it, pushing only when asked); reach for simple-tasks for standalone git chores that aren't tied to an implementation.
 
-**Briefing rule — give it the change, the settled decisions, and the verification bar.** State what to build and why, name the decisions that are already made so it doesn't re-open them, point it at the entry files or symbols, and define "done" (which build/tests must pass). Don't hand it open design questions — settle those with a thinker first, or expect them bounced back. Pass the project root (e.g. `cwd: /path/to/project`) so it works in the right place.
+**Briefing rule — the change, the settled decisions, and the verification bar; pointers, not payloads.** State what to build and why, and name the decisions that are already made so it doesn't re-open them. Point it at the entry files or symbols — it has full repo access and reads the surrounding code itself, so don't paste in what it can open; anchors (`path:line`, symbol names) beat transcribed code. Size the brief to the change: a three-line fix needs a few lines of brief (what, where, done-when) — an 80-line spec for it costs more than the change and adds nothing. Define "done" proportional to blast radius (see [Scale verification to blast radius](#scale-verification-to-blast-radius)) — don't demand the full suite for a cosmetic fix. Don't hand it open design questions — settle those with a thinker first, or expect them bounced back. Pass the project root (e.g. `cwd: /path/to/project`) so it works in the right place.
 
 ## simple-tasks — the runner
 
@@ -88,4 +90,34 @@ The roster of specialized subagents you can spawn, what each is for, and how to 
 
 **researcher vs. simple-tasks for multi-hop:** pick **researcher** when the output is *understanding* — a structured flow map of how a system works. Pick **simple-tasks** when the output is *a concrete result or collected facts* and the path is mechanical (gather all X, apply Y everywhere, run Z and report).
 
-A common chain: **researcher** maps the flow → **thinker** reasons over those findings to decide the approach → **executer** implements, verifies, and commits the change. Spawn each with a brief sized to its job; pass concrete pointers (paths, anchors, the exact route) so it doesn't re-discover what you already know.
+---
+
+## Running the fleet
+
+Routing picks the right agent; these rules keep the fleet fast. In practice, ignoring them — not mis-routing — is where delegation time actually goes.
+
+### Brief for the agent's tools, sized to the job
+
+The roster splits in two. **Tool-less agents (thinker, super-thinker)** know only what's in the prompt — for them, pack the context: every fact, constraint, snippet, and option. **Tool-having agents (researcher, executer, simple-tasks)** can read the repo themselves — give them *pointers, not payloads*: the goal, the settled decisions, and exact anchors (`path:line`, symbol names) to start from. Don't transcribe code they can open.
+
+Then scale length to the job, not to the agent's capability. A three-line fix needs a three-line brief; writing a spec for it costs more than the change. Save the long brief for work that earns it — many settled decisions, subtle constraints, a wide surface. "More context is always better" is true only for the tool-less agents.
+
+### Spawn fresh by default; resume sparingly
+
+You can continue a previous agent with `SendMessage`, and it keeps its whole transcript — that continuity is exactly the cost: **every resume re-processes the entire accumulated transcript before any new work starts**, so a long-lived agent gets slower and more expensive with every exchange. A deep transcript (100k+ tokens) can take minutes just to chew through before the first new tool call.
+
+Resume only when the agent holds state that is genuinely expensive to rebuild: it's mid-implementation with half-applied changes, or you're drilling one follow-up into a research thread it just built. If you can restate what the next task needs in a paragraph or two, **spawn fresh with that distilled brief** — a new agent with distilled context beats an old agent with all of it, almost every time. Re-apply that test before *each* resume, not just the first: the exceptions are one-shot follow-ups, and past the second exchange with the same agent you should distill what it knows and respawn. Never keep a "pet" agent as the default channel for a stream of loosely related tasks; that converts every small task's cost into the whole history's cost.
+
+### Parallelize independent work
+
+Agents launched in a single message run concurrently — so when units of work don't depend on each other's output, **send them together**: three researchers mapping three subsystems, one executer per independent fix, the researcher mapping the *next* piece while an executer builds the current one. Serializing independent agents is pure wall-clock waste.
+
+Serialize only along real data dependencies. researcher → thinker → executer is a dependency chain *within one topic*; separate topics run their chains side by side, and stages can pipeline across topics. One caution: don't point parallel executers at the same files — they will collide. Split by disjoint areas, or serialize within one. And since each executer commits its own work, parallel executers in the same repo can still race at the git layer: tell each to stage explicit paths only (never `git add -A`), or hold the commits and hand them to one simple-tasks agent afterward.
+
+### Scale verification to blast radius
+
+The "done" bar you set in an executer brief should cost in proportion to what the change can break. A docstring or comment fix needs at most a typecheck/build. A localized code change needs the tests nearest it plus typecheck. Only a cross-cutting change — shared helper, public interface, config — earns the wide suite. When the brief is silent, the executer defaults to typecheck/build plus the tests nearest the change, widening when cheap; the bar you set in the brief governs, and it can scope that down for a cosmetic edit or up for a cross-cutting one — just never past the blast radius. Demanding the full suite for a docstring fix is the classic self-inflicted slowdown.
+
+### The chain, run well
+
+A common chain: **researcher** maps the flow → **thinker** reasons over those findings to decide the approach → **executer** implements, verifies, and commits the change. The chain is sequential within a topic, but nothing else has to wait on it: run other topics' chains beside it, and start the next piece's research while this piece is being built. Spawn each agent fresh with a brief sized to its job; pass concrete pointers (paths, anchors, the exact route) so it doesn't re-discover what you already know.

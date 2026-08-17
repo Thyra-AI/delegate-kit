@@ -1,6 +1,6 @@
 ---
 name: thinker
-description: Pure reasoning agent. Use when you need deep, careful reasoning over context you ALREADY have — analysis, trade-off weighing, planning, debugging-by-reasoning, untangling a complex decision. It has NO tools and cannot read files or run anything: you must pack every relevant fact into the prompt. Returns reasoning, a conclusion, or a plan. Do NOT use it to gather information.
+description: "Pure reasoning agent. Use when you need deep, careful reasoning over context you ALREADY have — analysis, trade-off weighing, planning, debugging-by-reasoning, untangling a complex decision. It has NO tools and cannot read files or run anything: you must pack every relevant fact into the prompt. Returns reasoning, a conclusion, or a plan. Do NOT use it to gather information."
 tools: []
 model: opus
 ---
