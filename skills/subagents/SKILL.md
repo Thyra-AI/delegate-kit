@@ -1,6 +1,6 @@
 ---
 name: subagents
-description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Five types: thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping, never dumps whole files), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work). Use when deciding how to delegate work — pick the right agent, give it a brief sized to its job. Also covers fleet mechanics: pointers-not-payloads briefs for tool-having agents (packed context is for tool-less ones only), spawning fresh vs. the compounding cost of resuming via SendMessage, parallelizing independent agents, and a verification bar scaled to blast radius. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
+description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Five types: thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping AND external/web research via WebSearch+WebFetch, never dumps whole files or whole pages), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work). Use when deciding how to delegate work — pick the right agent, give it a brief sized to its job. Also covers fleet mechanics: pointers-not-payloads briefs for tool-having agents (packed context is for tool-less ones only), spawning fresh vs. the compounding cost of resuming via SendMessage, parallelizing independent agents, and a verification bar scaled to blast radius. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
 ---
 
 # /subagents
@@ -15,7 +15,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 |-------|-------|-------|------------|
 | **thinker** | opus | none | Deep reasoning over context you already have: analysis, trade-offs, planning, debugging-by-reasoning, hard decisions. |
 | **super-thinker** | fable | none | Same as thinker, but the top tier — reach for it when the reasoning is hardest or the call is highest-stakes and you want maximum depth. |
-| **researcher** | sonnet | Read/Grep/Glob/Bash (+ Serena & graphify when installed) | Understanding how something works: the full flow through the system and the nodes involved. |
+| **researcher** | sonnet | Read/Grep/Glob/Bash **+ WebSearch/WebFetch** (+ Serena & graphify when installed) | Understanding how something works — the full flow through the system and the nodes involved — **and** research whose answer lives outside the repo: external docs, APIs, specs, changelogs, the web. |
 | **executer** | sonnet 4.6 | Full: Edit/Write, Bash, Read/Grep/Glob (+ Serena when installed) | Implementing a settled plan end-to-end: write/edit code, run the project's build & tests, fix what it broke, report verified results. |
 | **simple-tasks** | haiku | Read/Grep/Glob/Bash (+ Serena when installed) | Mechanical chores (commits, pushes, commands, builds, file ops) **and** multi-hop low-judgment work — chains of dependent steps that would otherwise burn the expensive main context. |
 
@@ -43,13 +43,15 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 ## researcher — the flow mapper
 
-**What it is:** the research specialist. It maps how a system works — the end-to-end flow and the symbols/modules/services (nodes) involved.
+**What it is:** the research specialist, for **code and for the outside world**. It maps how a system works — the end-to-end flow and the symbols/modules/services (nodes) involved — and it is the agent for questions whose answer lives outside the repo, because it's the one with `WebSearch` and `WebFetch`.
 
 **The defining constraint:** it **never dumps a whole file.** In Power mode it navigates with **graphify** (`query` / `path` / `explain`) for flow and structure and **Serena symbol tools** for targeted reads; in Standard mode it uses **Grep** to locate and **Read** for targeted line ranges only. Either way it locates precisely and reads just what it needs, which keeps research cheap and focused.
 
 **Use when** you need to understand something before acting: "how does X flow end to end", "where does Y live and what touches it", "trace the path from A to B".
 
-**Briefing rule — name the target and the question, and include the project root.** Tell it exactly what to understand and what to return, and pass the project root (e.g. `cwd: /path/to/project`) so it scopes its navigation correctly (and, in Power mode, points graphify/Serena at the right project). It comes back with a structured flow report: ordered path, key nodes, connections, and `path:line` anchors for everything — so you (or the next agent) can act from the report alone.
+**Also use it for external research** — "what does the vendor's API actually require here", "what changed in v4 of this library", "what does the spec say" — including briefs that are *entirely* docs/web research with no repo component. That's in scope for the researcher; don't route it to a generic agent. The two mix well: it can read the official docs and then check what this repo actually does with them, and report the gap. Note the other tool-having agents (`executer`, `simple-tasks`) have **no** web access by design — they execute against the repo. If a task needs facts from outside, get them from the researcher first and hand them down.
+
+**Briefing rule — name the target and the question, and include the project root.** Tell it exactly what to understand and what to return, and pass the project root (e.g. `cwd: /path/to/project`) so it scopes its navigation correctly (and, in Power mode, points graphify/Serena at the right project). For external research, name the source you trust if you have one (the official docs, a specific repo, a version) rather than leaving it to guess. It comes back with a structured flow report: ordered path, key nodes, connections, and `path:line` anchors for everything — so you (or the next agent) can act from the report alone.
 
 ## executer — the coding workhorse
 
@@ -81,6 +83,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 - Need to **think** about what you already know → **thinker** (or **super-thinker** on Fable when the call is hardest / highest-stakes).
 - Need to **find out / understand** how something works, with a flow report to brief the next step → **researcher**.
+- Need facts from **outside the repo** (docs, APIs, specs, release notes, the web) → **researcher** — it's the only fleet agent with `WebSearch`/`WebFetch`.
 - Need to **build** something — write or change code and verify it — once the approach is settled → **executer**.
 - Need to **do** a clear mechanical task, **or** grind through many low-judgment hops to keep your own context clean → **simple-tasks**.
 

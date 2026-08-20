@@ -24,7 +24,7 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 |-------|-------|---------|
 | **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No tools. |
 | **thinker** | opus | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No tools, pure thought. |
-| **researcher** | sonnet | Mapping how a system works end-to-end. Never dumps whole files; returns an anchored flow report. |
+| **researcher** | sonnet | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
 | **executer** | sonnet 4.6 | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
 | **simple-tasks** | haiku | Mechanical chores (commits, pushes, builds, file ops) **and** cheap multi-hop context-saving work. |
 
@@ -68,13 +68,15 @@ Ask the main agent to route work, or invoke the playbook directly:
 Or just delegate in natural language and let Claude pick:
 
 - *"Trace how a request flows from the API route to the DB write."* → **researcher** returns an anchored flow report.
+- *"Find out what the Meta Graph API actually requires for this permission, and how our code calls it."* → **researcher** again — it has web access, so external-docs research is its job, not a fallback to a generic agent.
 - *"Given that flow, should we cache at the route or the service layer? Reason it through."* → **thinker** weighs the trade-off.
 - *"Implement caching at the service layer, run the tests, and commit it."* → **executer** writes the code, verifies it, and commits its own work.
 
 ## Integrations — the agents are wired for what you actually have
 
-Out of the box the agents navigate with built-in `Grep` / `Glob` / `Read` / `Bash`. That works
-everywhere and is a complete, honest setup on its own.
+Out of the box the agents navigate with built-in `Grep` / `Glob` / `Read` / `Bash` (plus
+`WebSearch` / `WebFetch` for the `researcher`). That works everywhere and is a complete, honest
+setup on its own.
 
 `/delegate-kit:setup` can additionally wire them for tools you have installed. Each integration is a
 **fragment** — a small file declaring the tool grants it adds and the prose that teaches an agent to
