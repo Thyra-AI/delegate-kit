@@ -11,7 +11,7 @@
       "source": "./",
       "description": "6 specialist subagents (thinker, super-thinker, researcher, executer, simple-tasks, bug-hunter) + the /subagents playbook for when to use each. Run /delegate-kit:setup to compose them for your machine — works on built-ins alone, and wires in Serena, graphify, the Python defect taxonomy, or your own integrations when you have them.",
       "category": "development",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "keywords": [
         "claude-code",
         "subagents",

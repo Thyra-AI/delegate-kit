@@ -111,8 +111,12 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
     applicable = [f for f in fragments if not f["agents"] or agent in f["agents"]]
 
     tools = split_list(fm.get("tools"))
+    granters = []
     for frag in applicable:
-        for tool in frag["tools"].get(agent, frag["tools"].get("*", [])):
+        granted = frag["tools"].get(agent, frag["tools"].get("*", []))
+        if granted:
+            granters.append(frag["name"])
+        for tool in granted:
             if tool not in tools:
                 tools.append(tool)
 
@@ -137,6 +141,17 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
             # tool-less agents it would read as "all tools" instead of "none"
             value = ", ".join(tools) if tools else "[]"
         lines.append(f"{key}: {value}")
+    if "tools" not in fm and granters:
+        # Deliberately not written out: an absent `tools:` means "inherit every
+        # tool", so these grants are already in effect. Emitting them here would
+        # turn an unrestricted agent into one limited to just this list. It still
+        # looks like a silent drop from the outside, so say what happened.
+        print(
+            f"note: {agent} declares no `tools:` line, so it inherits every tool; "
+            f"the grants from {', '.join(granters)} already apply and are not written "
+            "out. Give the template an explicit `tools:` line to restrict it.",
+            file=sys.stderr,
+        )
     lines.append("---")
     lines.append("")
     lines.append(GENERATED_NOTE)
