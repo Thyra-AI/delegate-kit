@@ -1,12 +1,12 @@
 # delegate-kit
 
-**A curated bench of 5 specialist subagents for Claude Code — and the playbook for when to delegate to which.**
+**A curated bench of 6 specialist subagents for Claude Code — and the playbook for when to delegate to which.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)
 ![One-command setup](https://img.shields.io/badge/setup-one%20command-brightgreen)
 
-Most agent collections give you a hundred role-experts (`react-expert`, `sql-expert`, …). **delegate-kit is the opposite: a small orchestration layer.** Five subagents organized not by domain but by *reasoning depth and context cost*, plus a `/subagents` skill that teaches the main agent **when to hand work off, and to whom** — so your expensive main context stays clean and your hard thinking gets the strongest model.
+Most agent collections give you a hundred role-experts (`react-expert`, `sql-expert`, …). **delegate-kit is the opposite: a small orchestration layer.** Six subagents organized not by domain but by *reasoning depth and context cost*, plus a `/subagents` skill that teaches the main agent **when to hand work off, and to whom** — so your expensive main context stays clean and your hard thinking gets the strongest model.
 
 ---
 
@@ -27,6 +27,7 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 | **researcher** | sonnet | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
 | **executer** | sonnet 4.6 | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
 | **simple-tasks** | haiku | Mechanical chores (commits, pushes, builds, file ops) **and** cheap multi-hop context-saving work. |
+| **bug-hunter** | haiku | Hunting real defects in a listed set of files or a diff. Never edits, never comments on style. Returns findings inline — or writes a JSON shard and returns one status line, so you can fan many out across a whole codebase. |
 
 The **`/subagents`** skill is the playbook: it gives the main agent the roster, briefing rules for each agent, and a decision guide for picking the right one — including the classic chain **researcher maps → thinker decides → executer builds, verifies & commits**.
 
@@ -39,7 +40,7 @@ The **`/subagents`** skill is the playbook: it gives the main agent the roster, 
 ```
 
 The third step is required, and takes one prompt. `/delegate-kit:setup` detects which optional
-integrations this machine actually has, asks you to confirm, and writes the five composed agent
+integrations this machine actually has, asks you to confirm, and writes the six composed agent
 definitions to `~/.claude/agents/`. **Start a new session afterwards** — agent definitions load at
 session start.
 
@@ -48,7 +49,7 @@ Re-run it whenever you add or remove an MCP server, or upgrade the plugin.
 You then have:
 
 - the **`/delegate-kit:subagents`** skill (the playbook), and
-- five spawnable agents: `thinker`, `super-thinker`, `researcher`, `executer`, `simple-tasks`.
+- six spawnable agents: `thinker`, `super-thinker`, `researcher`, `executer`, `simple-tasks`, `bug-hunter`.
 
 > **Why a setup step instead of shipping the agents directly?** Agent frontmatter is static — `tools:`
 > is read at load time with no conditionals — so a shipped definition would have to either grant tools
@@ -71,6 +72,7 @@ Or just delegate in natural language and let Claude pick:
 - *"Find out what the Meta Graph API actually requires for this permission, and how our code calls it."* → **researcher** again — it has web access, so external-docs research is its job, not a fallback to a generic agent.
 - *"Given that flow, should we cache at the route or the service layer? Reason it through."* → **thinker** weighs the trade-off.
 - *"Implement caching at the service layer, run the tests, and commit it."* → **executer** writes the code, verifies it, and commits its own work.
+- *"Sweep the four files we just touched for bugs."* → **bug-hunter** returns only demonstrable defects — each with a verbatim snippet, a concrete failure scenario, and a severity. Point several at different batches to review a whole subsystem at once.
 
 ## Integrations — the agents are wired for what you actually have
 
@@ -80,12 +82,16 @@ setup on its own.
 
 `/delegate-kit:setup` can additionally wire them for tools you have installed. Each integration is a
 **fragment** — a small file declaring the tool grants it adds and the prose that teaches an agent to
-use them. Two ship with the plugin:
+use them. Three ship with the plugin:
 
 - **[Serena](https://github.com/oraios/serena)** — MCP server for symbol-level navigation (read one
   symbol, not a whole file). Applies to `executer`, `researcher`, `simple-tasks`.
 - **graphify** — flow/structure knowledge graphs (`graphify query/path/explain`). Applies to
   `researcher`; adds prose only, since it runs through Bash.
+- **python** — the Python defect taxonomy (asyncio, FastAPI, SQLAlchemy, plus Python-only traps)
+  for the `bug-hunter`. Applies to `bug-hunter`; adds prose only. It deliberately declares **no**
+  auto-detection: `python` on your `PATH` says nothing about whether the code you review is Python,
+  so setup lists it unselected and asks rather than guessing.
 
 Composition is declarative: re-running setup with a smaller selection genuinely *removes* an
 integration, tools and prose both.
@@ -141,10 +147,12 @@ delegate-kit/
 │   ├── super-thinker.md
 │   ├── researcher.md
 │   ├── executer.md
-│   └── simple-tasks.md
+│   ├── simple-tasks.md
+│   └── bug-hunter.md
 ├── integrations/            # optional fragments (tool grants + prose)
 │   ├── serena.md
-│   └── graphify.md
+│   ├── graphify.md
+│   └── python.md
 ├── bin/
 │   └── compose.py           # templates + fragments -> ~/.claude/agents
 ├── commands/

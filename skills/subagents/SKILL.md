@@ -1,6 +1,6 @@
 ---
 name: subagents
-description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Five types: thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping AND external/web research via WebSearch+WebFetch, never dumps whole files or whole pages), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work). Use when deciding how to delegate work — pick the right agent, give it a brief sized to its job. Also covers fleet mechanics: pointers-not-payloads briefs for tool-having agents (packed context is for tool-less ones only), spawning fresh vs. the compounding cost of resuming via SendMessage, parallelizing independent agents, and a verification bar scaled to blast radius. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
+description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Six types: thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping AND external/web research via WebSearch+WebFetch, never dumps whole files or whole pages), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work), bug-hunter (cheap disposable defect reviewer over a listed set of files or a diff — never edits, never comments on style, fans out many at a time). Use when deciding how to delegate work — pick the right agent, give it a brief sized to its job. Also covers fleet mechanics: pointers-not-payloads briefs for tool-having agents (packed context is for tool-less ones only), spawning fresh vs. the compounding cost of resuming via SendMessage, parallelizing independent agents, and a verification bar scaled to blast radius. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
 ---
 
 # /subagents
@@ -18,6 +18,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 | **researcher** | sonnet | Read/Grep/Glob/Bash **+ WebSearch/WebFetch** (+ Serena & graphify when installed) | Understanding how something works — the full flow through the system and the nodes involved — **and** research whose answer lives outside the repo: external docs, APIs, specs, changelogs, the web. |
 | **executer** | sonnet 4.6 | Full: Edit/Write, Bash, Read/Grep/Glob (+ Serena when installed) | Implementing a settled plan end-to-end: write/edit code, run the project's build & tests, fix what it broke, report verified results. |
 | **simple-tasks** | haiku | Read/Grep/Glob/Bash (+ Serena when installed) | Mechanical chores (commits, pushes, commands, builds, file ops) **and** multi-hop low-judgment work — chains of dependent steps that would otherwise burn the expensive main context. |
+| **bug-hunter** | haiku | Read/Grep/Write (Write = its findings shard only) | Hunting real defects in an explicit list of files or a diff. Never edits code, never comments on style. Cheap and disposable — built to be fanned out many at a time over a batched codebase. |
 
 > **Two modes for researcher, executer & simple-tasks.** They work with **zero setup** using built-in `Read`/`Grep`/`Glob`/`Bash` (Standard mode). If the project has [Serena](https://github.com/oraios/serena) (symbol-precise navigation) and/or graphify (flow/structure graphs), they automatically prefer those for cheaper, more precise navigation (Power mode). Nothing to configure either way.
 
@@ -77,6 +78,22 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 **Reporting contract:** it reports condensed but with all the important content — commands run, exit status, commit SHA, files changed, and for gather tasks the **findings with exact `path:line` anchors** so you can act without re-walking the trail. It pastes **verbatim output for anything that failed**, and must never claim success for a command it didn't actually run and verify.
 
+## bug-hunter — the defect reviewer
+
+**What it is:** a lean, disposable reviewer that reads exactly the files you list and hunts for real bugs. It **never edits code** and **never comments on style** — its `Write` grant exists for one purpose, dropping a findings shard at a path you name. Cheap by construction: you are meant to spawn several at once, each seeing one slice.
+
+**Two output modes.** Give it no output path and it returns findings inline. Give it one and it writes a JSON shard there and returns a **single status line** (`B012 ok findings=3 high=1`). That second mode is what makes a large sweep affordable — the findings land on disk, not in your context, so reviewing eighty files costs you eighty status lines.
+
+**The discipline that makes it worth trusting:** it reviews each file immediately after reading it (never read-everything-then-summarize, which produces summaries instead of bugs); it has a hard budget of six Greps for the whole job, usable only to confirm or kill a candidate that depends on code outside its slice; and every finding must clear a self-check — a **verbatim** quote from the file plus a concrete trigger → wrong-behavior scenario in 60 words, at confidence 0.6 or better. Anything that fails, it drops. It caps at 15 findings and will hand you three rather than pad to fifteen. Snippets are copied verbatim precisely so you can verify a claim by re-opening the file at the stated line.
+
+**Use it for** a targeted defect sweep over known files: the services you just touched, a diff before it ships, or a whole subsystem split into batches and fanned out. Findings come back classified (`async.` `authz.` `sec.` `data.` `logic.` …) with severity and confidence, so you can triage without re-reading the code.
+
+**Do NOT use it** as a general code reviewer or a question-answerer. It will not tell you whether a design is sound, will not review architecture, and will not comment on naming, structure, or test coverage — by construction, not by omission. It also will not look outside the files you listed, so **you** own choosing the slice; a vague "review the codebase" brief gets you nothing.
+
+**Briefing rule — list the files explicitly, and say where the output goes.** Name every file (with `range: [start, end]`, and `also: [[1, K]]` for the header, when you are slicing a large one), or hand it a diff. Add a batch id and an output path if you want shard mode. Keep a batch to roughly 15 files or ~25k tokens of source — past that its per-file attention falls off faster than the per-spawn overhead you save, and you get summaries instead of findings. Pass the project root so relative paths resolve.
+
+**Language taxonomies.** The base agent knows language-neutral defect classes. `/delegate-kit:setup` can splice in a language section — the shipped `python` fragment adds asyncio/FastAPI/SQLAlchemy specifics and Python-only traps. It works without one; it finds more with one.
+
 ---
 
 ## Picking the right one
@@ -85,6 +102,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 - Need to **find out / understand** how something works, with a flow report to brief the next step → **researcher**.
 - Need facts from **outside the repo** (docs, APIs, specs, release notes, the web) → **researcher** — it's the only fleet agent with `WebSearch`/`WebFetch`.
 - Need to **build** something — write or change code and verify it — once the approach is settled → **executer**.
+- Need to **find bugs** in a specific set of files or a diff, with every finding demonstrable → **bug-hunter** (fan several out to cover a whole subsystem).
 - Need to **do** a clear mechanical task, **or** grind through many low-judgment hops to keep your own context clean → **simple-tasks**.
 
 **Default to offloading.** If a task would cost *you* (the expensive main agent) a long string of reads/greps/commands or a grind of edit–run–fix cycles, hand it off — implementation to **executer**, low-judgment hops and chores to **simple-tasks** — with a clear goal and stopping condition, even if you can't pre-write every step. The work burns their cheaper context instead of yours, and you get back a condensed report. Reserve your own context for the decisions only you can make.
@@ -92,6 +110,8 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 **executer vs. simple-tasks:** if the briefing is a *change to implement* (needs ordinary engineering judgment and code edits), that's **executer** — and it commits the work it implements. If it's a *command list or mechanical route* with no design calls — including standalone git chores not tied to an implementation — that's **simple-tasks**.
 
 **researcher vs. simple-tasks for multi-hop:** pick **researcher** when the output is *understanding* — a structured flow map of how a system works. Pick **simple-tasks** when the output is *a concrete result or collected facts* and the path is mechanical (gather all X, apply Y everywhere, run Z and report).
+
+**bug-hunter vs. researcher:** researcher explains *how the code works*; bug-hunter asserts *where it is wrong*. If you don't yet know which files matter, that's a researcher job first — bug-hunter needs the slice handed to it. And don't send it to *fix* what it finds: it reports, the **executer** repairs.
 
 ---
 
@@ -114,6 +134,8 @@ Resume only when the agent holds state that is genuinely expensive to rebuild: i
 ### Parallelize independent work
 
 Agents launched in a single message run concurrently — so when units of work don't depend on each other's output, **send them together**: three researchers mapping three subsystems, one executer per independent fix, the researcher mapping the *next* piece while an executer builds the current one. Serializing independent agents is pure wall-clock waste.
+
+**bug-hunter is the extreme case.** Its slices are independent by construction, so a codebase sweep is one message with many spawns rather than a loop. Give each a distinct output path — two agents writing the same shard is the only way they can collide — and keep the pending set on disk if the sweep is large: a batch is done once its shard exists, so an interrupted run resumes by re-spawning only the batches with no shard, at no cost for the ones already finished.
 
 Serialize only along real data dependencies. researcher → thinker → executer is a dependency chain *within one topic*; separate topics run their chains side by side, and stages can pipeline across topics. One caution: don't point parallel executers at the same files — they will collide. Split by disjoint areas, or serialize within one. And since each executer commits its own work, parallel executers in the same repo can still race at the git layer: tell each to stage explicit paths only (never `git add -A`), or hold the commits and hand them to one simple-tasks agent afterward.
 

@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, AskUserQuestion
 
 # delegate-kit — setup
 
-Compose the five subagent definitions from the shipped templates plus whichever
+Compose the six subagent definitions from the shipped templates plus whichever
 optional integrations this environment actually has, and install them to
 `~/.claude/agents`.
 
@@ -29,7 +29,7 @@ python "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --list
 
 This prints every fragment found, in both the plugin's `integrations/` and the user's
 `~/.claude/delegate-kit/integrations/` (same name = the user's wins), each with a
-`detect_mcp` (an MCP server name) or `detect_bin` (an executable on PATH).
+`detect_mcp` (an MCP server name), a `detect_bin` (an executable on PATH), or neither.
 
 If `python` isn't found, try `python3`, then `py -3`. If none work, stop and tell the
 user delegate-kit's setup needs Python 3 on PATH — don't try to compose by hand.
@@ -42,6 +42,10 @@ For each fragment, work out whether its dependency is present:
   deferred rather than loaded, so search for them before concluding a server is absent.
   Deferred-but-listed counts as present.
 - **`detect_bin`** — check PATH, e.g. `command -v <bin>`.
+- **Neither** — some fragments declare no detection because presence isn't the question.
+  The shipped `python` fragment is one: `python` on PATH says nothing about whether the
+  code this user reviews is Python. Treat these as *ask, never assume* — list them
+  unselected and let the user say.
 
 Report what you found as a short list: present, absent, and the one case worth calling
 out — a fragment whose dependency you could **not** determine either way.
@@ -83,7 +87,7 @@ Tell the user:
   `.delegate-kit-backup`.
 
 Then check for the duplicate-definition trap and warn if it applies: if a **project**
-`.claude/agents/` directory defines any of the same five names, or an older delegate-kit
+`.claude/agents/` directory defines any of the same six names, or an older delegate-kit
 install is still enabled with its own `agents/`, those register alongside these and the
 model may spawn either. Name the conflicting paths; let the user decide what to remove.
 
