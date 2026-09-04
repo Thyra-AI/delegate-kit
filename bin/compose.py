@@ -110,22 +110,28 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
     fm, body = split_frontmatter(template_text)
     applicable = [f for f in fragments if not f["agents"] or agent in f["agents"]]
 
+    # One pass, because a fragment's grants and its prose have to stay paired:
+    # the only thing worth failing on is a fragment that does both — lands a tool
+    # *and* loses the prose that teaches it. Counting the two independently blames
+    # whichever fragment happened to grant something for prose it never wrote.
     tools = split_list(fm.get("tools"))
-    granters = []
+    granters, blocks, prose_from, untaught = [], [], [], []
     for frag in applicable:
         granted = frag["tools"].get(agent, frag["tools"].get("*", []))
-        if granted:
-            granters.append(frag["name"])
+        added = []
         for tool in granted:
             if tool not in tools:
                 tools.append(tool)
+                added.append(tool)
 
-    blocks, prose_from = [], []
-    for frag in applicable:
-        text = frag["sections"].get(agent) or frag["shared"]
-        if text.strip():
-            blocks.append(text.strip())
+        text = (frag["sections"].get(agent) or frag["shared"]).strip()
+        if text:
+            blocks.append(text)
             prose_from.append(frag["name"])
+        if added:
+            granters.append(frag["name"])
+        if added and text:
+            untaught.append(frag["name"])
 
     if MARKER in body:
         replacement = "\n\n".join(blocks) if blocks else ""
@@ -133,17 +139,18 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
         # collapse the blank-line pileup a removed marker leaves behind
         body = re.sub(r"\n{3,}", "\n\n", body)
     elif blocks:
-        if granters:
-            # tools would land while the prose explaining them is dropped — that
-            # produces an agent holding tools it was never taught to use
+        if untaught:
+            # these fragments land a tool and lose their own prose in the same
+            # breath — the agent would hold tools nothing ever taught it to use
             raise ValueError(
-                f"{agent}: {', '.join(granters)} grant(s) tools but the template has no "
-                f"{MARKER} to splice their prose into"
+                f"{agent}: {', '.join(untaught)} grant(s) tools and carry prose, but the template "
+                f"has no {MARKER} to splice that prose into"
             )
-        # A prose-only fragment aimed at a template with nowhere to put it. The
-        # tool-less agents carry no marker by design, so a fragment that omits
-        # `agents:` (meaning "all of them") lands here. Nothing that matters is
-        # lost — no grants were made — but don't drop it silently.
+        # Prose with no grant riding on it. The tool-less agents carry no marker
+        # by design, so a fragment that omits `agents:` (meaning "all of them")
+        # lands here. Nothing that matters is lost — every tool that did arrive
+        # came from a fragment that wrote no prose about it — but don't drop it
+        # silently.
         print(
             f"note: {agent}: prose from {', '.join(prose_from)} not applied — the template has "
             f"no {MARKER}. Add `agents:` to the fragment to limit where it applies.",

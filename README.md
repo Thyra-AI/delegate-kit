@@ -23,7 +23,7 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 
 | Agent | Model | Best at |
 |-------|-------|---------|
-| **director** | fable | **The agent you talk to.** Run your session as it — `{ "agent": "director" }` in `.claude/settings.json`, or `claude --agent director` from a terminal — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** for the same work. |
+| **director** | fable | **The agent you talk to.** Run your session as it — `/delegate-kit:director on` for a project, or `claude --agent director` for one terminal session — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** for the same work. |
 | **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No tools. |
 | **thinker** | opus | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No tools, pure thought. |
 | **researcher** | sonnet | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
@@ -51,7 +51,7 @@ Re-run it whenever you add or remove an MCP server, or upgrade the plugin.
 You then have:
 
 - the **`/delegate-kit:subagents`** skill (the playbook),
-- **the `director` session mode** — run your whole session as the orchestrator, on any surface,
+- **`/delegate-kit:director on`** — make this project's sessions start as the orchestrator,
 - **`/delegate-kit:run <objective>`** — hand off a single objective from a normal session, and
 - six spawnable specialists: `thinker`, `super-thinker`, `researcher`, `executer`, `simple-tasks`, `bug-hunter`.
 
@@ -85,24 +85,30 @@ This is the main way to use it. **The director is the agent you talk to** — yo
 as it, and from then on every read, grep, edit, test run and commit happens in a worker's context
 instead of yours. Two ways in, depending on where you work:
 
-**Any surface — a project default.** Put this in the project's `.claude/settings.json`:
+**Any surface — a project setting.** In the project you want to direct:
 
-```json
-{ "agent": "director" }
+```
+/delegate-kit:director on
 ```
 
-Every new session opened on that folder starts as the director. This is the only route that works
-in the **Claude desktop app**, where there is no command line to pass a flag to, and it is the one
-to reach for if a project is usually worth directing.
+That writes `{ "agent": "director" }` into `.claude/settings.local.json`, and every new session
+opened on that folder starts as the director. `/delegate-kit:director off` removes it; with no
+argument it just tells you whether it's on — worth knowing, because this is a property of the
+folder, and it is easy to forget you left it running. (The key is the whole mechanism; you can edit
+the file by hand instead. Put it in `.claude/settings.json` rather than the `.local` one only if you
+want everyone who clones the repo to get director mode too.)
 
-**Terminal — a one-session flag.** From the CLI, when you want it for this session only:
+**Terminal — a one-session flag.** From the CLI, when you want it for this session only and want no
+residue afterwards:
 
 ```
 claude --agent director
 ```
 
-(Use `.claude/settings.local.json` instead if you don't want the choice committed — same key, same
-effect, personal to your machine.)
+There is no per-session equivalent in the **Claude desktop app** — the agent is chosen at launch,
+from a flag or from settings, and the app gives you no launch flag to pass. So on the desktop the
+question isn't *when do I direct*, it's *which folders are director folders*. Pick the projects with
+real multi-step work in them; use `/delegate-kit:run` (below) everywhere else.
 
 Either way, your session now has exactly one tool — the ability to spawn the rest of the fleet. You
 talk to it normally; it decides, delegates, and reports. Because it holds the conversation, the
@@ -110,8 +116,10 @@ knowledge of the work accumulates across turns the way it would with any main ag
 spends context on file contents to get there. To confirm it took, ask the new session to read a
 file: a director will spawn a worker rather than reading anything itself.
 
-There is also a hand-off path for when you're already in a normal session and want to give away one
-bounded objective without switching modes:
+### Handing over one objective instead
+
+When you're already in a normal session and want to give away a single bounded objective without
+turning the whole project over:
 
 ```
 /delegate-kit:run --plan-only "Add rate limiting to the public API routes"
@@ -119,9 +127,13 @@ bounded objective without switching modes:
 ```
 
 (`--plan-only` fans out researchers and returns the approach and delegation map, changing nothing.)
-That path stacks a director *underneath* your main agent, so you pay for both — measured at ~64%
-more than running as the director directly. Use it for a one-off; switch modes if you're doing this
-all session.
+
+This stacks a director *underneath* your main agent, so you pay for both — measured at ~64% more
+than running as the director directly. Read that premium as **per objective, not per session**: it
+is the price of one hand-off, not a running cost. If you direct a handful of times a day, that is
+far cheaper than living in a folder where every quick edit has to go through a worker — which makes
+this the sensible default in the desktop app, and the reason to reserve `/delegate-kit:director on`
+for projects that genuinely earn it.
 
 Either way the nested spawns show up live as child tasks, so it isn't a black box, and you get one
 consolidated result. The shape of it (illustrative):
@@ -291,7 +303,8 @@ delegate-kit/
 │   └── compose.py           # templates + fragments -> ~/.claude/agents
 ├── commands/
 │   ├── setup.md             # /delegate-kit:setup
-│   └── run.md               # /delegate-kit:run — hand an objective to the director
+│   ├── run.md               # /delegate-kit:run — hand an objective to the director
+│   └── director.md          # /delegate-kit:director — director mode on/off for a project
 └── skills/
     └── subagents/
         └── SKILL.md         # the /subagents delegation playbook

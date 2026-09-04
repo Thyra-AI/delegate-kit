@@ -86,10 +86,10 @@ Tell the user:
   current session still has the old ones;
 - **how to use the `director`** — it is not spawned like the others, it's the agent you talk to.
   Its only tool is spawning the other six, so every read and edit lands in a worker's context
-  instead of the expensive one. Give the project-settings route first — it is the only one that
+  instead of the expensive one. Give the project route first — it is the only one that
   works everywhere, the desktop app included, where there is no command line to pass a flag to:
-  `{ "agent": "director" }` in the project's `.claude/settings.json`. The `claude --agent director`
-  flag is the terminal-only, one-session alternative. (`/delegate-kit:run` hands it a single
+  `/delegate-kit:director on`. The `claude --agent director` flag is the terminal-only, one-session
+  alternative. (`/delegate-kit:run` hands it a single
   objective from a normal session instead, at a higher cost — mention it as the one-off path, not
   the default.) If a director ever reports it cannot spawn, raise
   `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`;
@@ -107,20 +107,20 @@ Composing the agents does not make any of them the session agent — `director` 
 settings route is the only one available in the desktop app, offer it rather than leaving the user
 to find it:
 
-> Want new sessions in this project to start as the `director`? I can add `{ "agent": "director" }`
-> to `.claude/settings.json`.
+> Want new sessions in this project to start as the `director`? `/delegate-kit:director on` sets
+> that up, and `off` undoes it.
 
-Only if they say yes: merge the `agent` key into the project's `.claude/settings.json`, creating
-the file if it does not exist. **Merge, never overwrite** — that file routinely holds permissions,
-hooks and env the user cares about.
+Only if they say yes, run that command for them — it owns the details (local settings file rather
+than the committed one, merge rather than overwrite, `.gitignore` check).
 
-Be straight about the trade before writing it, because it is easy to be surprised by:
+Be straight about the trade before turning it on, because it is easy to be surprised by:
 
 - every new session on this folder has **no file tools at all** — no reading, editing, or running
   commands directly, only delegation. That is the entire point, but it is a real change to how the
   project feels to work in;
 - it takes effect on the **next** session, not this one;
-- undoing it is removing the one key.
+- undoing it is `/delegate-kit:director off`, best run from a normal session — a director has no
+  file tools, so switching itself off means delegating the edit.
 
 Suggest it for projects with real multi-step work in them. For a project where the user mostly asks
 one-off questions, the director is a Fable-priced middleman — say so instead of pushing it.
