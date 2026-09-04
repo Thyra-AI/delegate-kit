@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, AskUserQuestion
 
 # delegate-kit — setup
 
-Compose the six subagent definitions from the shipped templates plus whichever
+Compose the seven subagent definitions from the shipped templates plus whichever
 optional integrations this environment actually has, and install them to
 `~/.claude/agents`.
 
@@ -80,14 +80,22 @@ tools and prose both. That's how you uninstall one.
 Tell the user:
 
 - which agents were written, and which integrations each ended up with (the script prints
-  this per file — `thinker` and `super-thinker` take none by design, they have no tools);
+  this per file — `thinker`, `super-thinker` and `director` take none by design: the first two
+  have no tools, and the director's only tool is spawning the others);
 - that **a new session is required** — agent definitions load at session start, so the
   current session still has the old ones;
+- **how to use the `director`** — it is not spawned like the others, it's the agent you talk to.
+  Start a session as it with `claude --agent director`, or make it a project default with
+  `{ "agent": "director" }` in `.claude/settings.json`. Its only tool is spawning the other six, so
+  every read and edit lands in a worker's context instead of the expensive one. (`/delegate-kit:run`
+  hands it a single objective from a normal session instead, at a higher cost — mention it as the
+  one-off path, not the default.) If a director ever reports it cannot spawn, raise
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`;
 - if any `~/.claude/agents/*.md` existed before, that the originals are in
   `.delegate-kit-backup`.
 
 Then check for the duplicate-definition trap and warn if it applies: if a **project**
-`.claude/agents/` directory defines any of the same six names, or an older delegate-kit
+`.claude/agents/` directory defines any of the same seven names, or an older delegate-kit
 install is still enabled with its own `agents/`, those register alongside these and the
 model may spawn either. Name the conflicting paths; let the user decide what to remove.
 

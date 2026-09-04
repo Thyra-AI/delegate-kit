@@ -120,11 +120,12 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
             if tool not in tools:
                 tools.append(tool)
 
-    blocks = []
+    blocks, prose_from = [], []
     for frag in applicable:
         text = frag["sections"].get(agent) or frag["shared"]
         if text.strip():
             blocks.append(text.strip())
+            prose_from.append(frag["name"])
 
     if MARKER in body:
         replacement = "\n\n".join(blocks) if blocks else ""
@@ -132,7 +133,22 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
         # collapse the blank-line pileup a removed marker leaves behind
         body = re.sub(r"\n{3,}", "\n\n", body)
     elif blocks:
-        raise ValueError(f"{agent}: fragments apply but template has no {MARKER}")
+        if granters:
+            # tools would land while the prose explaining them is dropped — that
+            # produces an agent holding tools it was never taught to use
+            raise ValueError(
+                f"{agent}: {', '.join(granters)} grant(s) tools but the template has no "
+                f"{MARKER} to splice their prose into"
+            )
+        # A prose-only fragment aimed at a template with nowhere to put it. The
+        # tool-less agents carry no marker by design, so a fragment that omits
+        # `agents:` (meaning "all of them") lands here. Nothing that matters is
+        # lost — no grants were made — but don't drop it silently.
+        print(
+            f"note: {agent}: prose from {', '.join(prose_from)} not applied — the template has "
+            f"no {MARKER}. Add `agents:` to the fragment to limit where it applies.",
+            file=sys.stderr,
+        )
 
     lines = ["---"]
     for key, value in fm.items():

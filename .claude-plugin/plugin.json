@@ -1,7 +1,7 @@
 {
   "name": "delegate-kit",
-  "version": "0.4.1",
-  "description": "A curated bench of 6 specialist subagents for Claude Code — reasoning, research, coding, review, and execution — plus the /subagents playbook for when to delegate to which. Keep your main context clean; delegate the rest.",
+  "version": "0.5.0",
+  "description": "A curated bench of 7 specialist subagents for Claude Code — orchestration, reasoning, research, coding, review, and execution — plus the /subagents playbook for when to delegate to which. Hand a whole objective to the director, or route work yourself; either way your main context stays clean.",
   "author": {
     "name": "José Ribeiro",
     "url": "https://github.com/Jose-Ribeir"

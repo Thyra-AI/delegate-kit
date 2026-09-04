@@ -1,6 +1,6 @@
 ---
 name: subagents
-description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Six types: thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping AND external/web research via WebSearch+WebFetch, never dumps whole files or whole pages), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work), bug-hunter (cheap disposable defect reviewer over a listed set of files or a diff — never edits, never comments on style, fans out many at a time). Use when deciding how to delegate work — pick the right agent, give it a brief sized to its job. Also covers fleet mechanics: pointers-not-payloads briefs for tool-having agents (packed context is for tool-less ones only), spawning fresh vs. the compounding cost of resuming via SendMessage, parallelizing independent agents, and a verification bar scaled to blast radius. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
+description: "Roster of the specialized subagents the main agent can spawn, and when to use each. Seven types: director (the orchestrator you run your session AS via `claude --agent director` — no file access at all, it only spawns the rest of the fleet to do every read and edit; measured at 75% fewer Fable tokens for the same work), thinker (pure reasoning, no tools), super-thinker (pure reasoning, top-tier model, no tools — for the hardest calls), researcher (flow-mapping AND external/web research via WebSearch+WebFetch, never dumps whole files or whole pages), executer (the coding workhorse — writes/edits code, runs the build & tests, on an efficient model), simple-tasks (mechanical chores incl. commits/pushes AND cheap multi-hop context-saving work), bug-hunter (cheap disposable defect reviewer over a listed set of files or a diff — never edits, never comments on style, fans out many at a time). Use when deciding how to delegate work — pick the right agent, give it a brief sized to its job. Also covers fleet mechanics: pointers-not-payloads briefs for tool-having agents (packed context is for tool-less ones only), spawning fresh vs. the compounding cost of resuming via SendMessage, parallelizing independent agents, and a verification bar scaled to blast radius. Offload implementation to executer and many-hop low-judgment work to simple-tasks to keep the expensive main context clean."
 ---
 
 # /subagents
@@ -13,6 +13,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 | Agent | Model | Tools | Use it for |
 |-------|-------|-------|------------|
+| **director** | fable | spawning agents, and nothing else | The agent you *talk to*, not one you spawn: `claude --agent director` makes it the session. It delegates every read, edit, command and commit to the agents below and decides from their reports. |
 | **thinker** | opus | none | Deep reasoning over context you already have: analysis, trade-offs, planning, debugging-by-reasoning, hard decisions. |
 | **super-thinker** | fable | none | Same as thinker, but the top tier — reach for it when the reasoning is hardest or the call is highest-stakes and you want maximum depth. |
 | **researcher** | sonnet | Read/Grep/Glob/Bash **+ WebSearch/WebFetch** (+ Serena & graphify when installed) | Understanding how something works — the full flow through the system and the nodes involved — **and** research whose answer lives outside the repo: external docs, APIs, specs, changelogs, the web. |
@@ -23,6 +24,24 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 > **Two modes for researcher, executer & simple-tasks.** They work with **zero setup** using built-in `Read`/`Grep`/`Glob`/`Bash` (Standard mode). If the project has [Serena](https://github.com/oraios/serena) (symbol-precise navigation) and/or graphify (flow/structure graphs), they automatically prefer those for cheaper, more precise navigation (Power mode). Nothing to configure either way.
 
 ---
+
+## director — the orchestrator
+
+**What it is:** the agent you *talk to*, not one you normally spawn. Started with `claude --agent director` (or `"agent": "director"` in settings), it becomes the session's main agent — running on Fable with **no file access whatsoever**: it cannot read, grep, edit, or run a command. Its only tool is spawning the specialists below. It holds the conversation, delegates every concrete piece of work, decides on the reports that come back, and answers with outcome, decisions, changes with commit SHAs, verification, and open items.
+
+**Why the tool starvation is the point.** Fable tokens are the expensive ones, so the director is built so they can only ever buy judgment. File contents, grep output, build logs and test runs land in *its workers'* context, never its own. Measured on a real cross-module bug fix: **51k Fable tokens versus 204k** for the same objective done inline — 75% less, at 12% more total spend, because the displaced work moved onto models that cost a fraction per token.
+
+**If you are reading this as the director,** the rest of this skill is your routing guide: it tells you which specialist takes which work and how to brief each one. Your own agent definition carries the ledger protocol and spend limits.
+
+**If you are a normal main agent,** you can still hand the director one bounded objective with `/delegate-kit:run` — but that stacks a director underneath you and you pay for both (measured ~63% more than running as the director outright). Worth it for a one-off; if you're doing it repeatedly, tell the user to start their session as the director instead.
+
+**It's worth it when** the objective has **three or more delegation hops**: *"add rate limiting to the public API routes"*, *"work out why the nightly job is flaky and fix it"*, *"sweep this subsystem for defects and remediate what's real"*. Below that, the fixed per-spawn overhead stops amortizing — asking it for a one-line change costs a whole executer spawn to do what could have been described faster. The other real cost is **latency**: delegation is round trips, measured at ~2.9× wall clock. If someone is watching and waiting, that's the price, not the money.
+
+**Relay by reference — the mechanic worth knowing.** The director opens a run ledger at `.delegate-kit/runs/<slug>/` and every brief it writes names an output path there. Agents write the full artifact to disk and return a ≤15-line decision-grade digest plus the path; the *next* agent gets the path and reads it itself. The payload moves between agents through the filesystem, never through the expensive context. (`bug-hunter`'s shard mode is the same trick, built in.) `.delegate-kit/` belongs in `.gitignore`.
+
+**Briefing rule (when you spawn one) — state the objective, the project root, and what it must not do without asking.** A spawned director cannot read this conversation, so hand it any context it would otherwise pay a researcher to rediscover: decisions already made, constraints, approaches already tried. Give it the absolute project root — every brief it writes depends on it. Say whether it may change code and commit, or is plan-only. And if the objective is near anything irreversible or outward-facing (a push, a deploy, a migration, a delete), tell it explicitly to stop and return before that step. `/delegate-kit:run` composes all of this for you.
+
+**Reading its report:** don't re-verify by re-opening the files it touched — that spends the context you paid to save. Check a specific claim if one looks wrong, and read the ledger for detail rather than asking again.
 
 ## thinker — the reasoning engine
 
@@ -98,6 +117,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 ## Picking the right one
 
+- Doing multi-hop work all session and want the fleet run for you by default → tell the user to start as the **director** (`claude --agent director`). For a single bounded objective from a normal session, `/delegate-kit:run`. Below three hops, route directly instead.
 - Need to **think** about what you already know → **thinker** (or **super-thinker** on Fable when the call is hardest / highest-stakes).
 - Need to **find out / understand** how something works, with a flow report to brief the next step → **researcher**.
 - Need facts from **outside the repo** (docs, APIs, specs, release notes, the web) → **researcher** — it's the only fleet agent with `WebSearch`/`WebFetch`.
@@ -108,6 +128,8 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 **Default to offloading.** If a task would cost *you* (the expensive main agent) a long string of reads/greps/commands or a grind of edit–run–fix cycles, hand it off — implementation to **executer**, low-judgment hops and chores to **simple-tasks** — with a clear goal and stopping condition, even if you can't pre-write every step. The work burns their cheaper context instead of yours, and you get back a condensed report. Reserve your own context for the decisions only you can make.
 
 **executer vs. simple-tasks:** if the briefing is a *change to implement* (needs ordinary engineering judgment and code edits), that's **executer** — and it commits the work it implements. If it's a *command list or mechanical route* with no design calls — including standalone git chores not tied to an implementation — that's **simple-tasks**.
+
+**director vs. running the chain yourself:** you *are* an orchestrator, so the question is only who pays for the loop — and the cheapest answer is usually to *be* the director rather than to spawn one. Run the chain yourself when the user is steering, when you already hold the context, or when it's one or two hops. Use `/delegate-kit:run <objective>` (`--plan-only` for a read-only planning pass) for a single bounded objective; if it keeps coming up, say that starting the session with `claude --agent director` costs ~63% less than handing off from here each time.
 
 **researcher vs. simple-tasks for multi-hop:** pick **researcher** when the output is *understanding* — a structured flow map of how a system works. Pick **simple-tasks** when the output is *a concrete result or collected facts* and the path is mechanical (gather all X, apply Y everywhere, run Z and report).
 
@@ -121,7 +143,9 @@ Routing picks the right agent; these rules keep the fleet fast. In practice, ign
 
 ### Brief for the agent's tools, sized to the job
 
-The roster splits in two. **Tool-less agents (thinker, super-thinker)** know only what's in the prompt — for them, pack the context: every fact, constraint, snippet, and option. **Tool-having agents (researcher, executer, simple-tasks)** can read the repo themselves — give them *pointers, not payloads*: the goal, the settled decisions, and exact anchors (`path:line`, symbol names) to start from. Don't transcribe code they can open.
+The roster splits in two. **Tool-less agents (thinker, super-thinker)** know only what's in the prompt — for them, pack the context: every fact, constraint, snippet, and option. **Tool-having agents (researcher, executer, simple-tasks, bug-hunter)** can read the repo themselves — give them *pointers, not payloads*: the goal, the settled decisions, and exact anchors (`path:line`, symbol names) to start from. Don't transcribe code they can open.
+
+The **director** is the third case and takes a bit of both: it can't read anything itself, but it can spawn someone who will. When you spawn one, give it the *decisions and constraints* it would otherwise have to rediscover (a spawned director can't see this conversation) plus the pointers to start from — and leave the file contents to the agents it sends.
 
 Then scale length to the job, not to the agent's capability. A three-line fix needs a three-line brief; writing a spec for it costs more than the change. Save the long brief for work that earns it — many settled decisions, subtle constraints, a wide surface. "More context is always better" is true only for the tool-less agents.
 
