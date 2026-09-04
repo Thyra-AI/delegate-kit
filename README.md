@@ -23,7 +23,7 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 
 | Agent | Model | Best at |
 |-------|-------|---------|
-| **director** | fable | **The agent you talk to.** Run your session as it (`claude --agent director`) and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** for the same work. |
+| **director** | fable | **The agent you talk to.** Run your session as it — `{ "agent": "director" }` in `.claude/settings.json`, or `claude --agent director` from a terminal — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** for the same work. |
 | **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No tools. |
 | **thinker** | opus | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No tools, pure thought. |
 | **researcher** | sonnet | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
@@ -51,7 +51,7 @@ Re-run it whenever you add or remove an MCP server, or upgrade the plugin.
 You then have:
 
 - the **`/delegate-kit:subagents`** skill (the playbook),
-- **`claude --agent director`** — run your whole session as the orchestrator,
+- **the `director` session mode** — run your whole session as the orchestrator, on any surface,
 - **`/delegate-kit:run <objective>`** — hand off a single objective from a normal session, and
 - six spawnable specialists: `thinker`, `super-thinker`, `researcher`, `executer`, `simple-tasks`, `bug-hunter`.
 
@@ -83,22 +83,32 @@ Or just delegate in natural language and let Claude pick:
 
 This is the main way to use it. **The director is the agent you talk to** — you start your session
 as it, and from then on every read, grep, edit, test run and commit happens in a worker's context
-instead of yours:
+instead of yours. Two ways in, depending on where you work:
 
-```
-claude --agent director
-```
-
-Or make it the default for a project, in `.claude/settings.json`:
+**Any surface — a project default.** Put this in the project's `.claude/settings.json`:
 
 ```json
 { "agent": "director" }
 ```
 
-Your session now has exactly one tool — the ability to spawn the rest of the fleet. You talk to it
-normally; it decides, delegates, and reports. Because it holds the conversation, the knowledge of
-the work accumulates across turns the way it would with any main agent — it just never spends
-context on file contents to get there.
+Every new session opened on that folder starts as the director. This is the only route that works
+in the **Claude desktop app**, where there is no command line to pass a flag to, and it is the one
+to reach for if a project is usually worth directing.
+
+**Terminal — a one-session flag.** From the CLI, when you want it for this session only:
+
+```
+claude --agent director
+```
+
+(Use `.claude/settings.local.json` instead if you don't want the choice committed — same key, same
+effect, personal to your machine.)
+
+Either way, your session now has exactly one tool — the ability to spawn the rest of the fleet. You
+talk to it normally; it decides, delegates, and reports. Because it holds the conversation, the
+knowledge of the work accumulates across turns the way it would with any main agent — it just never
+spends context on file contents to get there. To confirm it took, ask the new session to read a
+file: a director will spawn a worker rather than reading anything itself.
 
 There is also a hand-off path for when you're already in a normal session and want to give away one
 bounded objective without switching modes:

@@ -1,2 +1,11 @@
 __pycache__/
 *.py[cod]
+
+# Claude Code — personal, per-machine settings
+.claude/settings.local.json
+
+# delegate-kit run ledger (director artifacts)
+.delegate-kit/
+
+# Cygwin/MSYS crash dumps
+*.stackdump

@@ -85,11 +85,13 @@ Tell the user:
 - that **a new session is required** — agent definitions load at session start, so the
   current session still has the old ones;
 - **how to use the `director`** — it is not spawned like the others, it's the agent you talk to.
-  Start a session as it with `claude --agent director`, or make it a project default with
-  `{ "agent": "director" }` in `.claude/settings.json`. Its only tool is spawning the other six, so
-  every read and edit lands in a worker's context instead of the expensive one. (`/delegate-kit:run`
-  hands it a single objective from a normal session instead, at a higher cost — mention it as the
-  one-off path, not the default.) If a director ever reports it cannot spawn, raise
+  Its only tool is spawning the other six, so every read and edit lands in a worker's context
+  instead of the expensive one. Give the project-settings route first — it is the only one that
+  works everywhere, the desktop app included, where there is no command line to pass a flag to:
+  `{ "agent": "director" }` in the project's `.claude/settings.json`. The `claude --agent director`
+  flag is the terminal-only, one-session alternative. (`/delegate-kit:run` hands it a single
+  objective from a normal session instead, at a higher cost — mention it as the one-off path, not
+  the default.) If a director ever reports it cannot spawn, raise
   `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`;
 - if any `~/.claude/agents/*.md` existed before, that the originals are in
   `.delegate-kit-backup`.
@@ -98,6 +100,32 @@ Then check for the duplicate-definition trap and warn if it applies: if a **proj
 `.claude/agents/` directory defines any of the same seven names, or an older delegate-kit
 install is still enabled with its own `agents/`, those register alongside these and the
 model may spawn either. Name the conflicting paths; let the user decide what to remove.
+
+## 6. Offer to turn on director mode here
+
+Composing the agents does not make any of them the session agent — `director` included. Since the
+settings route is the only one available in the desktop app, offer it rather than leaving the user
+to find it:
+
+> Want new sessions in this project to start as the `director`? I can add `{ "agent": "director" }`
+> to `.claude/settings.json`.
+
+Only if they say yes: merge the `agent` key into the project's `.claude/settings.json`, creating
+the file if it does not exist. **Merge, never overwrite** — that file routinely holds permissions,
+hooks and env the user cares about.
+
+Be straight about the trade before writing it, because it is easy to be surprised by:
+
+- every new session on this folder has **no file tools at all** — no reading, editing, or running
+  commands directly, only delegation. That is the entire point, but it is a real change to how the
+  project feels to work in;
+- it takes effect on the **next** session, not this one;
+- undoing it is removing the one key.
+
+Suggest it for projects with real multi-step work in them. For a project where the user mostly asks
+one-off questions, the director is a Fable-priced middleman — say so instead of pushing it.
+
+Also check `.gitignore` covers `.delegate-kit/` (the run ledger). If it does not, offer to add it.
 
 ## Writing a new integration
 
