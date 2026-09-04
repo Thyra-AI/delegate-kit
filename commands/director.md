@@ -19,9 +19,10 @@ switched on.
 
 ## 0. If you have no file tools, you are already in a director session
 
-Then you cannot edit settings yourself. Spawn `simple-tasks` to do the edit described below, or —
-better — tell the user to run this from a normal session. Turning director mode *off* from inside a
-director is the awkward case; say so plainly rather than delegating around it silently.
+Then you cannot edit settings yourself, and there is one rule: **say so, and let the user choose.**
+Tell them the edit has to happen in a worker's context, and offer to spawn `simple-tasks` to do it.
+Do not delegate it silently — a director quietly rewriting the setting that makes it the director is
+exactly the kind of thing a user should see coming.
 
 ## 1. Read the argument
 
@@ -64,9 +65,14 @@ Then tell the user, in this order:
 
 ## 4. `off`
 
-Remove the `agent` key from `.claude/settings.local.json`. If that leaves the file as an empty
-object, delete the file; if that leaves `.claude/` empty, remove the directory too — this command
-created both, so it should be able to leave no trace.
+**Check the value before removing anything.** Only remove the `agent` key if it is set to
+`director`. If it names some other agent, that key is not yours — report what it is set to and ask
+before touching it. The key is shared with every other agent someone might run as the session agent,
+and this command has no business clobbering one it did not write.
+
+Once confirmed, remove the key from `.claude/settings.local.json`. If that leaves the file as an
+empty object, delete the file; if that leaves `.claude/` empty, remove the directory too — this
+command created both, so it should be able to leave no trace.
 
 Leave the `.gitignore` entry alone. It is correct regardless of whether director mode is on.
 
