@@ -122,8 +122,7 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
     # *and* loses the prose that teaches it. Counting the two independently blames
     # whichever fragment happened to grant something for prose it never wrote.
     tools = split_list(fm.get("tools"))
-    declared = list(tools)
-    granters, blocks, prose_from, untaught = [], [], [], []
+    granters, blocks, prose_from = [], [], []
     for frag in applicable:
         granted = frag["tools"].get(agent, frag["tools"].get("*", []))
         added = []
@@ -138,8 +137,6 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
             prose_from.append(frag["name"])
         if added:
             granters.append(frag["name"])
-        if added and text:
-            untaught.append(frag["name"])
 
     if MARKER not in body and granters:
         # No marker means this template takes no integrations at all. A grant here
@@ -159,42 +156,15 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
         # collapse the blank-line pileup a removed marker leaves behind
         body = re.sub(r"\n{3,}", "\n\n", body)
     elif blocks:
-        if untaught:
-            # these fragments land a tool and lose their own prose in the same
-            # breath — the agent would hold tools nothing ever taught it to use
-            raise ValueError(
-                f"{agent}: {', '.join(untaught)} grant(s) tools and carry prose, but the template "
-                f"has no {MARKER} to splice that prose into"
-            )
-        # Prose with no grant riding on it. The tool-less agents carry no marker
-        # by design, so a fragment that omits `agents:` (meaning "all of them")
-        # lands here. Nothing that matters is lost — every tool that did arrive
-        # came from a fragment that wrote no prose about it — but don't drop it
-        # silently.
+        # Prose with no grant riding on it — anything that granted a tool already
+        # raised above. The agents that take no integrations carry no marker, so a
+        # fragment omitting `agents:` (meaning "all of them") lands here. Nothing
+        # that matters is lost, but don't drop it silently.
         print(
             f"note: {agent}: prose from {', '.join(prose_from)} not applied: the template has "
             f"no {MARKER}. Add `agents:` to the fragment to limit where it applies.",
             file=sys.stderr,
         )
-
-    # The director is the one agent whose value *is* what it cannot do: with no
-    # file access, every read and edit lands in a cheaper agent's context. A
-    # fragment that omits `agents:` applies to every agent, so without this an
-    # ordinary user-authored integration silently hands it a file tool and the
-    # guarantee is gone with nothing printed.
-    if agent == "director":
-        smuggled = [t for t in tools if t not in declared]
-        if smuggled:
-            culprits = ", ".join(
-                f["name"] for f in fragments
-                if not f["agents"] and f["tools"].get(agent, f["tools"].get("*", []))
-            ) or "an enabled fragment"
-            raise ValueError(
-                f"director would be granted {', '.join(smuggled)} by {culprits}. "
-                "The director must hold no tools but the ability to spawn: that is "
-                "the whole design. Scope the fragment with `agents:` so it does not "
-                "apply to every agent."
-            )
 
     lines = ["---"]
     for key, value in fm.items():
