@@ -175,7 +175,7 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
         if smuggled:
             culprits = ", ".join(
                 f["name"] for f in fragments
-                if not f["agents"] and f["tools"].get("*", f["tools"].get(agent, []))
+                if not f["agents"] and f["tools"].get(agent, f["tools"].get("*", []))
             ) or "an enabled fragment"
             raise ValueError(
                 f"director would be granted {', '.join(smuggled)} by {culprits}. "
