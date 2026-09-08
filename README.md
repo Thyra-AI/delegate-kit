@@ -136,7 +136,7 @@ turning the whole project over:
 
 (`--plan-only` fans out researchers and returns the approach and delegation map, changing nothing.)
 
-This stacks a director *underneath* your main agent, so you pay for both — measured at ~64% more
+This stacks a director *underneath* your main agent, so you pay for both — measured at ~63% more
 than running as the director directly. Read that premium as **per objective, not per session**: it
 is the price of one hand-off, not a running cost. If you direct a handful of times a day, that is
 far cheaper than living in a folder where every quick edit has to go through a worker — which makes

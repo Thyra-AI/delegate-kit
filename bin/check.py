@@ -84,8 +84,10 @@ def main():
                     "environment rather than none" % (path.name, value or "<empty>")
                 )
 
+        starved = {"director": ["Agent", "Task"], "thinker": ["Skill"],
+                   "super-thinker": ["Skill"]}
         for path in first:
-            if path.stem != "director":
+            if path.stem not in starved:
                 continue
             head = path.read_text(encoding="utf-8").split("---", 2)
             if len(head) <= 2:
@@ -93,10 +95,11 @@ def main():
                 continue
             m = re.search(r"^tools:(.*)$", head[1], re.M)
             got = [t.strip() for t in (m.group(1) if m else "").split(",") if t.strip()]
-            if sorted(got) != ["Agent", "Task"]:
+            if sorted(got) != sorted(starved[path.stem]):
                 failures.append(
-                    "director composed with tools %r; it must hold only Task and "
-                    "Agent, or its no-file-access guarantee is void" % (got,)
+                    "%s composed with tools %r, expected %r -- a fragment has "
+                    "widened an agent whose value is what it cannot do"
+                    % (path.stem, got, starved[path.stem])
                 )
 
     for tpl in sorted(TEMPLATES.glob("*.md")):
