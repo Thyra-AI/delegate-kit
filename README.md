@@ -264,10 +264,17 @@ That directory is never touched by a plugin update — which also makes it the r
 anything you don't want in a public repo.
 
 Two rules worth knowing when you write one. `agents:` is what limits where a fragment applies —
-**omit it and the fragment applies to every agent**, including the pure reasoners. If such a
-fragment grants tools, composition fails loudly (an agent would end up holding tools it was never
-taught to use); if it's prose-only, the prose is skipped for the templates that have no splice
-marker and you get a `note:` telling you which. Either way, setting `agents:` is the fix.
+**omit it and the fragment applies to every agent**, the director and the pure reasoners included.
+Composition refuses rather than let that through: a global fragment that grants tools is an error
+for `thinker`/`super-thinker` (they have no splice marker, so they would hold tools nothing taught
+them to use) and an error for the `director` (its whole design is that it has no tools but the
+ability to spawn). If it's prose-only, the prose is skipped where there is no marker and you get a
+`note:` naming which. Either way, setting `agents:` is the fix. Nothing is written unless every
+agent composes — a failed run leaves your installed definitions untouched.
+
+Write list values inline and comma-separated (`tools: Read, Grep`). The frontmatter parser is a
+single-line `key: value` reader, not YAML, so a `- Read` list item is rejected with an error rather
+than silently dropping your whole grant.
 
 ## Customizing
 

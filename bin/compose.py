@@ -45,7 +45,14 @@ def split_frontmatter(text: str) -> tuple[dict, str]:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         if ":" not in line:
-            continue
+            # This is a single-line `key: value` parser, not YAML. A list item
+            # ("  - Read") has no colon and would vanish silently, taking a
+            # fragment's whole tool grant with it — so say so instead.
+            raise ValueError(
+                f"frontmatter line {line.strip()!r} is not `key: value`. "
+                "Lists must be written inline and comma-separated "
+                "(`tools: Read, Grep`), not as YAML list items"
+            )
         key, _, value = line.partition(":")
         fm[key.strip()] = value.strip()
     return fm, text[m.end():]
@@ -115,6 +122,7 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
     # *and* loses the prose that teaches it. Counting the two independently blames
     # whichever fragment happened to grant something for prose it never wrote.
     tools = split_list(fm.get("tools"))
+    declared = list(tools)
     granters, blocks, prose_from, untaught = [], [], [], []
     for frag in applicable:
         granted = frag["tools"].get(agent, frag["tools"].get("*", []))
@@ -156,6 +164,25 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
             f"no {MARKER}. Add `agents:` to the fragment to limit where it applies.",
             file=sys.stderr,
         )
+
+    # The director is the one agent whose value *is* what it cannot do: with no
+    # file access, every read and edit lands in a cheaper agent's context. A
+    # fragment that omits `agents:` applies to every agent, so without this an
+    # ordinary user-authored integration silently hands it a file tool and the
+    # guarantee is gone with nothing printed.
+    if agent == "director":
+        smuggled = [t for t in tools if t not in declared]
+        if smuggled:
+            culprits = ", ".join(
+                f["name"] for f in fragments
+                if not f["agents"] and f["tools"].get("*", f["tools"].get(agent, []))
+            ) or "an enabled fragment"
+            raise ValueError(
+                f"director would be granted {', '.join(smuggled)} by {culprits}. "
+                "The director must hold no tools but the ability to spawn: that is "
+                "the whole design. Scope the fragment with `agents:` so it does not "
+                "apply to every agent."
+            )
 
     lines = ["---"]
     for key, value in fm.items():
@@ -258,17 +285,26 @@ def main() -> int:
     backup = args.out / ".delegate-kit-backup"
     written, stamp_files = [], {}
 
+    # Compose every agent BEFORE writing any of them. These definitions are a set:
+    # a run that writes four and then fails on the fifth leaves ~/.claude/agents
+    # holding a mix of old and new files -- and when the failure is a bad tool
+    # grant, one of the files already on disk is the compromised one. Validating
+    # everything first means a failed compose changes nothing at all.
+    composed = []
     for template in templates:
         agent = template.stem
         try:
             text = compose(template.read_text(encoding="utf-8"), agent, enabled)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            print("error: nothing written; no agent definition was changed.", file=sys.stderr)
             return 1
-        target = args.out / template.name
         applied = [f["name"] for f in enabled if not f["agents"] or agent in f["agents"]]
         stamp_files[template.name] = {"sha": sha(text), "integrations": applied}
+        composed.append((template, text, applied))
 
+    for template, text, applied in composed:
+        target = args.out / template.name
         if args.dry_run:
             print(f"would write {target}  [{', '.join(applied) or 'no integrations'}]")
             continue
