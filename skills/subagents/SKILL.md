@@ -45,7 +45,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 ## thinker — the reasoning engine
 
-**What it is:** pure thought. It reasons only over the context in your prompt and has **no tools** — it cannot read files, search, or run anything.
+**What it is:** pure thought. It reasons only over the context in your prompt and has **no file access** — it cannot read files, search, or run anything.
 
 **Use when** the hard part is *thinking*, not *finding*: weighing trade-offs, untangling a tricky decision, reasoning through a bug from facts you already have, designing an approach in your head.
 
@@ -55,7 +55,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 ## super-thinker — the top-tier reasoning engine
 
-**What it is:** the same pure-thought engine as thinker, but running on **Fable** — the strongest reasoning model. Identical constraints: **no tools** (can't read, search, or run), reasons only over the context you hand it. (No access to Fable? Change the agent's `model:` field to one you have.)
+**What it is:** the same pure-thought engine as thinker, but running on **Fable** — the strongest reasoning model. Identical constraints: **no file access** (can't read, search, or run), reasons only over the context you hand it. (No access to Fable? Change the agent's `model:` field to one you have.)
 
 **Use when** the reasoning is genuinely hard or the call is high-stakes and you want maximum depth: a subtle architectural trade-off, an intricate multi-factor decision, a gnarly bug you must reason out from the facts, a plan where a wrong call is expensive. When plain thinker would do, use thinker; reach for super-thinker when the extra reasoning depth is worth it.
 
@@ -153,7 +153,7 @@ Then scale length to the job, not to the agent's capability. A three-line fix ne
 
 You can continue a previous agent with `SendMessage`, and it keeps its whole transcript — that continuity is exactly the cost: **every resume re-processes the entire accumulated transcript before any new work starts**, so a long-lived agent gets slower and more expensive with every exchange. A deep transcript (100k+ tokens) can take minutes just to chew through before the first new tool call.
 
-Resume only when the agent holds state that is genuinely expensive to rebuild: it's mid-implementation with half-applied changes, or you're drilling one follow-up into a research thread it just built. If you can restate what the next task needs in a paragraph or two, **spawn fresh with that distilled brief** — a new agent with distilled context beats an old agent with all of it, almost every time. Re-apply that test before *each* resume, not just the first: the exceptions are one-shot follow-ups, and past the second exchange with the same agent you should distill what it knows and respawn. Never keep a "pet" agent as the default channel for a stream of loosely related tasks; that converts every small task's cost into the whole history's cost.
+Resume only when three observable things are all true: the agent **finished moments ago** and you're continuing immediately, it made **only a handful of tool calls** so there's little transcript to re-read, and the follow-up needs the **same tools it already has**. The cost isn't paid once at resume — a resumed agent re-reads its whole accumulated transcript on every call it then makes, so it compounds. If you can restate what the next task needs in a paragraph or two, **spawn fresh with that distilled brief** — a new agent with distilled context beats an old agent with all of it, almost every time. Re-apply that test before *each* resume, not just the first: the exceptions are one-shot follow-ups, and past the second exchange with the same agent you should distill what it knows and respawn. Never keep a "pet" agent as the default channel for a stream of loosely related tasks; that converts every small task's cost into the whole history's cost.
 
 ### Parallelize independent work
 
