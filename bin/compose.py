@@ -160,9 +160,20 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
     lines = ["---"]
     for key, value in fm.items():
         if key == "tools":
-            # never emit a bare `tools:` — an empty value is ambiguous, and for the
-            # tool-less agents it would read as "all tools" instead of "none"
-            value = ", ".join(tools) if tools else "[]"
+            # `tools: []` does NOT mean "no tools". Measured on Claude Code 2.1.263:
+            # an empty list (and an empty string) resolves to every MCP tool in the
+            # environment, while an absent `tools:` line grants every built-in. A
+            # genuinely tool-less agent is not expressible — the harness refuses to
+            # spawn one ("would be spawned with zero tools — refusing"). So the
+            # minimum is one real tool, and emitting an empty value is always a bug.
+            if not tools:
+                sys.exit(
+                    f"error: {agent} resolves to no tools. `tools: []` is not "
+                    f"\"no tools\": it grants every MCP tool in the environment, "
+                    f"and the harness refuses to spawn a genuinely tool-less agent. "
+                    f"Give the template an explicit minimal grant, e.g. `tools: Skill`."
+                )
+            value = ", ".join(tools)
         lines.append(f"{key}: {value}")
     if "tools" not in fm and granters:
         # Deliberately not written out: an absent `tools:` means "inherit every

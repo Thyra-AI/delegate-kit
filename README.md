@@ -24,8 +24,8 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 | Agent | Model | Best at |
 |-------|-------|---------|
 | **director** | fable | **The agent you talk to.** Run your session as it — `/delegate-kit:director on` for a project, or `claude --agent director` for one terminal session — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** for the same work. |
-| **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No tools. |
-| **thinker** | opus | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No tools, pure thought. |
+| **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No file access. |
+| **thinker** | opus | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No file access, pure thought. |
 | **researcher** | sonnet | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
 | **executer** | sonnet 4.6 | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
 | **simple-tasks** | haiku | Mechanical chores (commits, pushes, builds, file ops) **and** cheap multi-hop context-saving work. |
