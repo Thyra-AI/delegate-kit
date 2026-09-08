@@ -110,6 +110,14 @@ from a flag or from settings, and the app gives you no launch flag to pass. So o
 question isn't *when do I direct*, it's *which folders are director folders*. Pick the projects with
 real multi-step work in them; use `/delegate-kit:run` (below) everywhere else.
 
+**What it leaves in your repo.** A director run writes its working artifacts — subagent reports,
+logs, benchmark data, patches — to `.delegate-kit/` in the project root, and passes *paths* between
+agents so those payloads never enter its own context. That directory is working state, not something
+you commit: the first agent of a run adds it to `.git/info/exclude`, which is local and untracked, so
+your `.gitignore` stays yours. `/delegate-kit:director on` checks the same thing and offers to fix it
+if a run got there first. It is worth knowing the directory exists, because a long run fills it with
+megabytes and a stray `git add -A` would otherwise sweep the lot into your history.
+
 Either way, your session now has exactly one tool — the ability to spawn the rest of the fleet. You
 talk to it normally; it decides, delegates, and reports. Because it holds the conversation, the
 knowledge of the work accumulates across turns the way it would with any main agent — it just never
@@ -256,7 +264,7 @@ That directory is never touched by a plugin update — which also makes it the r
 anything you don't want in a public repo.
 
 Two rules worth knowing when you write one. `agents:` is what limits where a fragment applies —
-**omit it and the fragment applies to every agent**, including the ones with no tools. If such a
+**omit it and the fragment applies to every agent**, including the pure reasoners. If such a
 fragment grants tools, composition fails loudly (an agent would end up holding tools it was never
 taught to use); if it's prose-only, the prose is skipped for the templates that have no splice
 marker and you get a `note:` telling you which. Either way, setting `agents:` is the fix.
@@ -278,6 +286,22 @@ marker and you get a `note:` telling you which. Either way, setting `agents:` is
 - **Don't pass `model` when spawning.** An explicit `model` on the Agent call overrides the frontmatter
   pin and only accepts coarse aliases (`sonnet`/`opus`/`haiku`/`fable`), so it can't even express
   `claude-sonnet-4-6` — it silently swaps in a different model.
+- **There is no way to give an agent no tools**, and the obvious encodings do the opposite of what
+  they look like. Measured on Claude Code 2.1.263:
+
+  | frontmatter | what the agent actually gets |
+  |---|---|
+  | `tools: []` | **every MCP tool in your environment** |
+  | `tools: ""` | the same |
+  | *(line omitted)* | every built-in tool (~29k tokens of schema per spawn) |
+  | `tools: Read` | exactly `Read` |
+  | `tools: none` | refused — *"would be spawned with zero tools"* |
+
+  So an empty list reads as "no restriction", not "nothing", and the harness refuses to start an
+  agent that ends up with nothing. The minimum is one real tool: `thinker` and `super-thinker`
+  declare `tools: Skill` and are told not to use it. If you write your own reasoning agent, do the
+  same — `compose.py` now fails loudly rather than emitting an empty grant, and `bin/check.py`
+  catches it before you install.
 - **Add your own agents** alongside these and reference them from your own copy of the skill.
 
 ## How it's structured
@@ -300,7 +324,8 @@ delegate-kit/
 │   ├── graphify.md
 │   └── python.md
 ├── bin/
-│   └── compose.py           # templates + fragments -> ~/.claude/agents
+│   ├── compose.py           # templates + fragments -> ~/.claude/agents
+│   └── check.py             # guards: composition is deterministic, no empty tool grants
 ├── commands/
 │   ├── setup.md             # /delegate-kit:setup
 │   ├── run.md               # /delegate-kit:run — hand an objective to the director
