@@ -141,6 +141,18 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
         if added and text:
             untaught.append(frag["name"])
 
+    if MARKER not in body and granters:
+        # No marker means this template takes no integrations at all. A grant here
+        # would leave the agent holding tools nothing ever taught it to use -- and
+        # for the reasoners it would quietly undo the whole point of them. Checked
+        # before any prose handling, because a fragment that grants a tool and
+        # writes no prose slipped straight past the prose-gated check below.
+        raise ValueError(
+            f"{agent}: {', '.join(granters)} grant(s) tools, but this template takes "
+            f"no integrations (it has no {MARKER}). Scope the fragment with `agents:` "
+            f"so it does not apply here."
+        )
+
     if MARKER in body:
         replacement = "\n\n".join(blocks) if blocks else ""
         body = body.replace(MARKER, replacement, 1)
@@ -160,7 +172,7 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
         # came from a fragment that wrote no prose about it — but don't drop it
         # silently.
         print(
-            f"note: {agent}: prose from {', '.join(prose_from)} not applied — the template has "
+            f"note: {agent}: prose from {', '.join(prose_from)} not applied: the template has "
             f"no {MARKER}. Add `agents:` to the fragment to limit where it applies.",
             file=sys.stderr,
         )

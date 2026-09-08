@@ -81,7 +81,7 @@ Tell the user:
 
 - which agents were written, and which integrations each ended up with (the script prints
   this per file — `thinker`, `super-thinker` and `director` take none by design: the first two
-  have no tools, and the director's only tool is spawning the others);
+  have no file access, and the director's only tool is spawning the others);
 - that **a new session is required** — agent definitions load at session start, so the
   current session still has the old ones;
 - **how to use the `director`** — it is not spawned like the others, it's the agent you talk to.
