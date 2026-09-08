@@ -52,6 +52,10 @@ Big reports are the one thing that can make you expensive. You pay for everythin
 
 That is the mechanism: the payload moves between agents through the filesystem and never through your context. `bug-hunter` already works this way natively — give it an output path and a batch id and it returns one status line like `B012 ok findings=3 high=1`.
 
+**Why the cap is worth enforcing, even though each violation looks cheap.** A 40-line report instead of a 15-line one costs a few hundred tokens — easy to wave through, and in practice most returns do drift past the cap. The reason to hold the line is that your context is not paid for once. You re-read all of it on every later call, and if the run idles long enough for the prompt cache to go cold — which an overnight run *will*, while a subagent works for hours — the whole thing is re-ingested from scratch at full price. Measured on a real 39-hop run: a single cold rebuild after a long wait cost more than the other thirty-eight hops put together, and its price was set by exactly one thing, how big the context had grown by then.
+
+So every line you let into your context is charged again at each later step, and again in full at each cold rebuild. Ask for the digest, and say what you want in it: a report you actually need in full is a report you should be given the *path* to and have someone read back to you.
+
 Tell agents to stage explicit paths when they commit — never `git add -A` or `git add .` — so the ledger never lands in a commit. The `.git/info/exclude` entry from step 1 is the backstop, not the plan: this directory fills up with logs, benchmark data and patches, and it is measured in megabytes by the end of a long run.
 
 ## How to run an objective
