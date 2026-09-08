@@ -110,8 +110,10 @@ to find it:
 > Want new sessions in this project to start as the `director`? `/delegate-kit:director on` sets
 > that up, and `off` undoes it.
 
-Only if they say yes, run that command for them — it owns the details (local settings file rather
-than the committed one, merge rather than overwrite, `.gitignore` check).
+Point them at the command; do not run it for them. It owns details this one has no business
+touching — the local settings file rather than the committed one, merging rather than overwriting,
+refusing to clobber an `agent` key someone else set, and the `.gitignore`/ledger checks. Setup
+composes agent definitions; flipping a project's session agent is a separate, deliberate act.
 
 Be straight about the trade before turning it on, because it is easy to be surprised by:
 

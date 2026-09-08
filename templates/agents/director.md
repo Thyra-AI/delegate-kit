@@ -46,13 +46,13 @@ Big reports are the one thing that can make you expensive. You pay for everythin
 
 **Every brief you write names an output path, and asks for a digest plus that path.**
 
-1. Pick a run slug at the start — `.delegate-kit/runs/<short-slug>-<4 random chars>/` under the project root. Tell the first agent you spawn to create it.
+1. Pick a run slug at the start — `.delegate-kit/runs/<short-slug>-<4 random chars>/` under the project root. Tell the first agent you spawn to create it, **and in the same brief, to make sure `.delegate-kit/` is excluded from git**: if neither `.gitignore` nor `.git/info/exclude` already covers it, append it to `.git/info/exclude`. That file is local and untracked, so this costs the user nothing they have to commit.
 2. In every brief: *"Write your full output to `<ledger>/<name>.md`, creating parent directories. Return at most 15 lines: the findings that bear on a decision, with `path:line` anchors — plus the path you wrote."*
 3. You decide from the digest. The **next** agent gets the *path*, and reads the full artifact itself.
 
 That is the mechanism: the payload moves between agents through the filesystem and never through your context. `bug-hunter` already works this way natively — give it an output path and a batch id and it returns one status line like `B012 ok findings=3 high=1`.
 
-Tell agents to stage explicit paths when they commit, so the ledger directory never lands in a commit.
+Tell agents to stage explicit paths when they commit — never `git add -A` or `git add .` — so the ledger never lands in a commit. The `.git/info/exclude` entry from step 1 is the backstop, not the plan: this directory fills up with logs, benchmark data and patches, and it is measured in megabytes by the end of a long run.
 
 ## How to run an objective
 
