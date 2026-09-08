@@ -273,7 +273,9 @@ def main() -> int:
         ))
         return 0
 
-    requested = split_list(args.enable)
+    # Deduped and sorted: a repeated name splices the same fragment's prose twice,
+    # and two orderings of one set produce different files for the same request.
+    requested = sorted(dict.fromkeys(split_list(args.enable)))
     unknown = [name for name in requested if name not in fragments]
     if unknown:
         print(f"error: unknown fragment(s): {', '.join(unknown)}", file=sys.stderr)
