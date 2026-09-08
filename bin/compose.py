@@ -167,8 +167,8 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
             # spawn one ("would be spawned with zero tools — refusing"). So the
             # minimum is one real tool, and emitting an empty value is always a bug.
             if not tools:
-                sys.exit(
-                    f"error: {agent} resolves to no tools. `tools: []` is not "
+                raise ValueError(
+                    f"{agent} resolves to no tools. `tools: []` is not "
                     f"\"no tools\": it grants every MCP tool in the environment, "
                     f"and the harness refuses to spawn a genuinely tool-less agent. "
                     f"Give the template an explicit minimal grant, e.g. `tools: Skill`."
