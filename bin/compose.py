@@ -124,6 +124,9 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
     # *and* loses the prose that teaches it. Counting the two independently blames
     # whichever fragment happened to grant something for prose it never wrote.
     tools = split_list(fm.get("tools"))
+    # `tools` is mutated in place by the grant loop below; keep what the template
+    # itself asked for, so an error can name exactly what a fragment would add.
+    declared = list(tools)
     granters, blocks, prose_from = [], [], []
     for frag in applicable:
         granted = frag["tools"].get(agent, frag["tools"].get("*", []))
@@ -153,7 +156,8 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
             )
         if granters:
             raise ValueError(
-                f"{agent}: {', '.join(granters)} would grant it {', '.join(t for t in tools if t not in split_list(fm.get('tools')))}. "
+                f"{agent}: {', '.join(granters)} would grant it "
+                f"{', '.join(t for t in tools if t not in declared)}. "
                 f"This agent takes no integrations at all. Scope the fragment with "
                 f"`agents:` so it does not apply here."
             )
