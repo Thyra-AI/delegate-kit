@@ -87,8 +87,11 @@ def main():
         for path in first:
             if path.stem != "director":
                 continue
-            fm = path.read_text(encoding="utf-8").split("---", 2)[1]
-            m = re.search(r"^tools:(.*)$", fm, re.M)
+            head = path.read_text(encoding="utf-8").split("---", 2)
+            if len(head) <= 2:
+                failures.append("%s has no parseable frontmatter" % path.name)
+                continue
+            m = re.search(r"^tools:(.*)$", head[1], re.M)
             got = [t.strip() for t in (m.group(1) if m else "").split(",") if t.strip()]
             if sorted(got) != ["Agent", "Task"]:
                 failures.append(
