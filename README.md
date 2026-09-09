@@ -17,13 +17,13 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 - **Offload the grind.** Multi-hop, low-judgment work goes to a cheap agent; the tool output lands in *its* context, not yours.
 - **Reserve depth for decisions.** Hard trade-offs go to a pure-reasoning agent on the strongest model, with no tool noise.
 - **Map before you touch.** Understand a system via a flow report with `path:line` anchors instead of pasting whole files.
-- **Or run the whole session on rails.** Start as the `director` and your main agent has *no file tools at all* — it can only delegate, so every read, edit and test run lands in a cheap worker. Measured on a real cross-module bug fix: **75% fewer Fable tokens for 12% more money.** [The full numbers, including where the trade goes bad.](#what-it-saves--measured)
+- **Or run the whole session on rails.** Start as the `director` and your main agent has *no file tools at all* — it can only delegate, so every read, edit and test run lands in a cheap worker. Measured across 1,233 real sessions: on objectives past ~35 tool calls it runs **6–10× cheaper per unit of work**, because the expensive model never accumulates a context. Below that line it costs *more*. [The full numbers, both directions.](#what-it-saves--measured)
 
 ## The roster
 
 | Agent | Model | Best at |
 |-------|-------|---------|
-| **director** | fable | **The agent you talk to.** Run your session as it — `/delegate-kit:director on` for a project, or `claude --agent director` for one terminal session — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** for the same work. |
+| **director** | fable | **The agent you talk to.** Run your session as it — `/delegate-kit:director on` for a project, or `claude --agent director` for one terminal session — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** on a small task, and **6–10× cheaper per unit of work** on large ones — but *more* expensive below ~35 tool calls. |
 | **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No file access. |
 | **thinker** | opus | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No file access, pure thought. |
 | **researcher** | sonnet | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
@@ -160,14 +160,22 @@ into its own context, it just passes the paths between agents. Add `.delegate-ki
 `.gitignore`.
 
 The mental model: **`super-thinker` is the advisor you brief; `director` is the lead you hand the
-objective to.** Below about three delegation hops, skip the director and spawn the specialist
-directly — otherwise it's a Fable-priced middleman.
+objective to.** Below roughly 35 tool calls of work — about three delegation hops — skip the
+director and spawn the specialist directly; under that line it's a Fable-priced middleman and
+[measurably costs more](#the-crossover-about-35-tool-calls).
 
 ### What it saves — measured
 
-The whole premise is that Fable tokens should buy judgment and nothing else. So the question worth
-measuring is narrow: **for the same objective, how many Fable tokens does directing cost versus
-doing it yourself?**
+The whole premise is that Fable tokens should buy judgment and nothing else. There are two
+measurements below, because **the answer flips depending on how big the job is**: a controlled A/B
+on a small task, and the production logs on large ones. The small task says directing costs *more*.
+The large runs say it costs *6–10× less*. Both are true, and the crossover is the useful number.
+
+*All dollar figures price cache reads separately from writes and output — on Fable 5.1 that's
+$0.25 vs $12.50 vs $50.00 per MTok, a 200× spread. Summing "total tokens" across those classes
+hides the entire effect.*
+
+#### Small task, matched A/B: directing costs ~25% more
 
 **Setup.** A 5-module Python checkout service with a real cross-module bug (sales tax computed on
 the pre-discount base, so members were overcharged) and 2 of 4 tests failing — fixing it needs
@@ -185,10 +193,14 @@ normal full-tool Fable session, arm B is `claude --agent director`.
 | Wall clock | 54.1s | 155.8s | ×2.9 |
 | Correct fix, suite green | 2/2 runs | 2/2 runs | — |
 
-**Three quarters of the Fable tokens, for 12% more money.** The work didn't disappear — the fleet
-did 2.3× the raw token volume — it moved onto models that cost a fraction as much per token. That
-is the entire trade, and on this task it very nearly pays for itself in cash alone before you count
-the context you got back.
+**Three quarters of the Fable tokens, for ~12–30% more money** (the range depends on how you price
+cache reads). The work didn't disappear — the fleet did 2.3× the raw token volume — it moved onto
+models that cost a fraction as much per token.
+
+**This task needed 3 tool calls. The fleet spent 14 doing it.** That 4.7× redundancy is the cost of
+delegation at small size: every fresh subagent re-reads from zero what a solo agent already had in
+context. With almost no context to amortize, there is nothing for that overhead to buy. This arm is
+the director being used wrong, measured honestly.
 
 Two things that make up the 75%:
 
@@ -203,9 +215,9 @@ Two things that make up the 75%:
 **What it costs you: latency, ×2.9 here.** Delegation is round trips, and round trips are wall
 clock. If you're watching and waiting, that's the real price — not the money.
 
-**When to skip it.** Below about three delegation hops the fixed per-spawn overhead stops
-amortizing and you're paying a middleman for nothing; ask the director for a one-file change and it
-will spawn an executer to do what it could have described faster. And the `/delegate-kit:run`
+**When to skip it.** Below ~35 tool calls of work the fixed per-spawn overhead stops amortizing and
+you're paying a middleman for nothing; ask the director for a one-file change and it will spawn an
+executer to do what it could have described faster. And the `/delegate-kit:run`
 hand-off path stacks a director under your existing main agent, so you pay for both — that measured
 **$1.21 vs $0.74**, ~63% more than just running as the director. Fine for a one-off; switch modes
 if you're doing it all session.
@@ -213,6 +225,91 @@ if you're doing it all session.
 *Stated plainly: n=2 per arm, one task, one repo. It's the shape of the trade, not a benchmark
 suite. Per-spawn overhead is largely fixed, so larger objectives amortize it better than this one
 did — and a one-hop task will invert it.*
+
+#### Large runs, from the logs: directing costs 6–10× less
+
+The arm above is a 3-tool-call task. The director is built for objectives two orders of magnitude
+bigger, so the small A/B can't answer whether it pays. For that, 1,233 real sessions were parsed out
+of `~/.claude/projects` — main chains plus `subagents/*.jsonl` — split into input / cache-write /
+cache-read / output and priced per model. 426 are solo sessions (little or no delegation); 10 are
+director-shaped, meaning the main agent made **zero** file-tool calls and only spawned.
+
+**A solo agent pays cache-read on its entire accumulated context, every turn.** That is quadratic in
+work done, and it is the whole bill: in the largest solo sessions, cache reads are **76–81% of the
+dollars**. Median across the 426 solo sessions, bucketed by work volume:
+
+| work (tool calls) | 9 | 31 | 68 | 142 | 282 | 490 | 987 |
+|---|---|---|---|---|---|---|---|
+| median context carried per turn | 55k | 75k | 119k | 156k | 275k | 438k | 462k |
+| **median $ per tool call** | **0.050** | 0.095 | 0.174 | 0.194 | 0.379 | **0.667** | 0.620 |
+
+Context peaks hit **995k** — the 1M ceiling — then compact and climb again. The director never gets
+there, because its context accumulates briefs-out and reports-in, never file bodies:
+
+| director session | work (tool calls) | context carried per turn | **$ per tool call** |
+|---|---|---|---|
+| medium | 122 | 26k | **0.035** |
+| large | 1,130 | 60k | **0.058** |
+| largest | 1,638 | 138k | **0.063** |
+
+Correlation of $-per-unit-work against run size: **solo +0.62, director −0.52.** Solo gets worse
+with scale. Directing doesn't.
+
+**The confound, and why it doesn't rescue solo.** The large solo runs are Opus 5; the large director
+runs are Fable. That isn't the matched comparison the small A/B was. But repricing those solo runs'
+exact token profiles onto Fable 5.1 makes them *cheaper*, not dearer — **0.71–0.93×**, because
+Fable's cache read ($0.25/MTok) is half Opus's ($0.50) and these runs are ~80% cache read.
+Normalized that way, solo large runs cost **$0.44–$0.54 per tool call** against the director's
+**$0.058–$0.063**. The gap is ~8× with the confound removed.
+
+**On the metric that can't be gamed.** Counting tool calls flatters the director, since fleet
+re-reads inflate its denominator. Cost per actual *state change* (Edit/Write) doesn't:
+
+| | $ per file mutation |
+|---|---|
+| director, 1,638-unit run | **0.81** |
+| director, 1,130-unit run | **1.25** |
+| solo large runs | 2.12 · 2.46 · 4.45 · 5.96 · **11.88** |
+
+**Where the money goes** in the largest director run — 1,638 units of work, 39 delegations, $102.32:
+
+| | share | detail |
+|---|---|---|
+| Fable director | **35%** ($35.40) | output 45%, cache-write 41%, cache-read only 14% |
+| executer (Sonnet 4.6) | 54% ($55.16) | 1,172 units @ $0.047 |
+| researcher (Sonnet 5) | 7% ($7.29) | 229 units @ $0.032 |
+| simple-tasks (Haiku 4.5) | 3% ($3.36) | 197 units @ **$0.017** |
+| bug-hunter (Haiku 4.5) | 1% ($1.11) | 40 units @ $0.028 |
+
+Writing briefs is the director's real cost — output at $50/MTok, not reading. Solo sessions at *one
+third* that work volume ran a median **$338.79**.
+
+**The counterintuitive part:** the director's context grows *faster per turn* than a solo agent's —
+2,560–4,100 tokens/turn against ~1,100. Briefs and reports are dense. It wins by needing **144 turns
+instead of 3,186**, not by having cheap turns.
+
+#### The crossover: about 35 tool calls
+
+Solo cost-per-unit-work passes the director's flat ~$0.10 at **W ≈ 34 tool calls** — roughly 15–25
+assistant turns. Reading off the bucketed medians above, with solo normalized onto Fable pricing so
+the two sides use the same top model:
+
+| objective size (tool calls) | solo $/unit | directed $/unit | verdict |
+|---|---|---|---|
+| under ~35 | ~0.05 | ~0.10 | **skip the director** — it costs ~25% more, and the small A/B above is what that looks like |
+| ~100 | ~0.15 | ~0.05 | ~3× cheaper directed |
+| ~500 | ~0.53 | ~0.058 | **~9× cheaper** |
+| ~1,000+ | ~0.50 | ~0.06 | **~8–10× cheaper** |
+
+The advantage plateaus rather than compounding forever, because compaction caps a solo agent's
+context near the 1M ceiling — which is why the 987-unit bucket ($0.620) is fractionally *cheaper*
+per unit than the 490-unit one ($0.667). Compaction bounds the damage; it doesn't undo it.
+
+*Stated plainly: the large-run half is observational, not a matched A/B — those solo and director
+sessions were different tasks, and only 2 large director runs exist in the logs, so treat the
+specific multiple as indicative. The mechanism underneath it is not observational: context growth is
+directly measured, mechanical, and model-independent. The direction of the effect is solid; the
+exact multiple is not.*
 
 ## Integrations — the agents are wired for what you actually have
 

@@ -31,7 +31,9 @@ If the objective is empty after stripping flags, ask what it is rather than spaw
 ## 2. Sanity-check the objective before spending anything
 
 The director is the most expensive agent in the kit. Spawn it only when the objective earns it —
-roughly **three or more delegation hops** and no need for the user to approve each step. If the
+roughly **35+ tool calls of work**, or three or more delegation hops, and no need for the user to
+approve each step. Below that threshold directing measurably costs *more* than doing the work
+directly. If the
 request is really a single hop ("what does X do", "fix this typo", "commit this"), say so in one
 line and route it directly to `researcher` / `executer` / `simple-tasks` instead. Getting this
 wrong costs the user real money for a middleman they didn't need.
