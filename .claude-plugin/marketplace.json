@@ -2,8 +2,8 @@
   "name": "delegate-kit",
   "description": "Specialist subagents + a delegation playbook for Claude Code.",
   "owner": {
-    "name": "José Ribeiro",
-    "url": "https://github.com/Jose-Ribeir"
+    "name": "Thyra AI",
+    "url": "https://github.com/Thyra-AI"
   },
   "plugins": [
     {

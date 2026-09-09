@@ -36,7 +36,7 @@ The **`/subagents`** skill is the playbook: it gives the main agent the roster, 
 ## Install
 
 ```
-/plugin marketplace add Jose-Ribeir/delegate-kit
+/plugin marketplace add Thyra-AI/delegate-kit
 /plugin install delegate-kit
 /delegate-kit:setup
 ```
@@ -351,4 +351,4 @@ Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Good first co
 
 ## License
 
-[MIT](LICENSE) © José Ribeiro
+[MIT](LICENSE) © Thyra AI
