@@ -14,10 +14,10 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 | Agent | Model | Tools | Use it for |
 |-------|-------|-------|------------|
 | **director** | fable | spawning agents, and nothing else | The agent you *talk to*, not one you spawn: `claude --agent director` makes it the session. It delegates every read, edit, command and commit to the agents below and decides from their reports. |
-| **thinker** | opus | no file access | Deep reasoning over context you already have: analysis, trade-offs, planning, debugging-by-reasoning, hard decisions. |
+| **thinker** | opus 5.5 (medium effort) | no file access | Deep reasoning over context you already have: analysis, trade-offs, planning, debugging-by-reasoning, hard decisions. |
 | **super-thinker** | fable | no file access | Same as thinker, but the top tier — reach for it when the reasoning is hardest or the call is highest-stakes and you want maximum depth. |
-| **researcher** | sonnet | Read/Grep/Glob/Bash **+ WebSearch/WebFetch** (+ Serena & graphify when installed) | Understanding how something works — the full flow through the system and the nodes involved — **and** research whose answer lives outside the repo: external docs, APIs, specs, changelogs, the web. |
-| **executer** | sonnet 4.6 | Full: Edit/Write, Bash, Read/Grep/Glob (+ Serena when installed) | Implementing a settled plan end-to-end: write/edit code, run the project's build & tests, fix what it broke, report verified results. |
+| **researcher** | sonnet 5.5 (high effort) | Read/Grep/Glob/Bash **+ WebSearch/WebFetch** (+ Serena & graphify when installed) | Understanding how something works — the full flow through the system and the nodes involved — **and** research whose answer lives outside the repo: external docs, APIs, specs, changelogs, the web. |
+| **executer** | sonnet 5.5 (high effort) | Full: Edit/Write, Bash, Read/Grep/Glob (+ Serena when installed) | Implementing a settled plan end-to-end: write/edit code, run the project's build & tests, fix what it broke, report verified results. |
 | **simple-tasks** | haiku | Read/Grep/Glob/Bash (+ Serena when installed) | Mechanical chores (commits, pushes, commands, builds, file ops) **and** multi-hop low-judgment work — chains of dependent steps that would otherwise burn the expensive main context. |
 | **bug-hunter** | haiku | Read/Grep/Write (Write = its findings shard only) | Hunting real defects in an explicit list of files or a diff. Never edits code, never comments on style. Cheap and disposable — built to be fanned out many at a time over a batched codebase. |
 
@@ -75,7 +75,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 ## executer — the coding workhorse
 
-**What it is:** the primary implementation agent — the main hands behind coding. Full tools including Edit/Write, running Sonnet 4.6 (deliberately: Sonnet 5 burns far more tokens for the same code, making it worse cost/perf than even Opus for this role; 4.6 is the efficient workhorse). Hand it a settled plan or a described change and it builds it end-to-end: reads the surrounding code, matches the repo's conventions, edits, runs the project's own build/tests/typecheck, fixes what it broke, and reports back verified results with verbatim output for anything that failed.
+**What it is:** the primary implementation agent — the main hands behind coding. Full tools including Edit/Write, running Sonnet 5.5 at high effort. Hand it a settled plan or a described change and it builds it end-to-end: reads the surrounding code, matches the repo's conventions, edits, runs the project's own build/tests/typecheck, fixes what it broke, and reports back verified results with verbatim output for anything that failed.
 
 **Use it when** the decision is made and code needs to exist. Any implementation work you'd otherwise do inline — feature code, bug fixes, refactors with a known shape, wiring a spec into the codebase — goes to the executer so your own context never gets spent on the edit–run–fix loop.
 

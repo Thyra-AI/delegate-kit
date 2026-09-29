@@ -25,9 +25,9 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 |-------|-------|---------|
 | **director** | fable | **The agent you talk to.** Run your session as it — `/delegate-kit:director on` for a project, or `claude --agent director` for one terminal session — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** on a small task, and **6–10× cheaper per unit of work** on large ones — but *more* expensive below ~35 tool calls. |
 | **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No file access. |
-| **thinker** | opus | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No file access, pure thought. |
-| **researcher** | sonnet | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
-| **executer** | sonnet 4.6 | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
+| **thinker** | opus 5.5 (medium effort) | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No file access, pure thought. |
+| **researcher** | sonnet 5.5 (high effort) | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
+| **executer** | sonnet 5.5 (high effort) | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
 | **simple-tasks** | haiku | Mechanical chores (commits, pushes, builds, file ops) **and** cheap multi-hop context-saving work. |
 | **bug-hunter** | haiku | Hunting real defects in a listed set of files or a diff. Never edits, never comments on style. Returns findings inline — or writes a JSON shard and returns one status line, so you can fan many out across a whole codebase. |
 
@@ -383,13 +383,14 @@ than silently dropping your whole grant.
   explicit `tools:` lists with no spawn tool.
 - **Models** are pinned per agent in `templates/agents/*.md` frontmatter (`model:`). Change any to a
   model you have access to — e.g. if you don't have `fable`, set `super-thinker` (and `director`) to
-  `opus`; the director's design rests on its tool starvation, not on the specific pin. `executer`
-  is pinned to the explicit id `claude-sonnet-4-6` (chosen over Sonnet 5 for token efficiency on
-  coding); if that id differs in your account, update it to your Sonnet 4.6 id rather than letting it
-  fall back to a heavier model. Re-run `/delegate-kit:setup` after editing a template.
+  `opus`; the director's design rests on its tool starvation, not on the specific pin. `thinker`
+  is pinned to the explicit id `claude-opus-5-5` at `effort: medium`; `researcher` and `executer`
+  to `claude-sonnet-5-5` at `effort: high`. If an id differs in your account, update it to the
+  equivalent id rather than letting it fall back to a heavier model. Re-run `/delegate-kit:setup`
+  after editing a template.
 - **Don't pass `model` when spawning.** An explicit `model` on the Agent call overrides the frontmatter
   pin and only accepts coarse aliases (`sonnet`/`opus`/`haiku`/`fable`), so it can't even express
-  `claude-sonnet-4-6` — it silently swaps in a different model.
+  `claude-sonnet-5-5` — it silently swaps in a different model.
 - **There is no way to give an agent no tools**, and the obvious encodings do the opposite of what
   they look like. Measured on Claude Code 2.1.263:
 

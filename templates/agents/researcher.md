@@ -2,7 +2,8 @@
 name: researcher
 description: Research agent for code AND the outside world. Use when you need to understand how something works end-to-end — the full flow through the system, which nodes/symbols are involved, what calls what, where a feature lives — and equally when the answer lives in external docs, APIs, specs, changelogs or the web (it has WebSearch/WebFetch). It navigates precisely and NEVER dumps whole files or whole pages. Returns a structured report with exact path:line anchors and cited source URLs. Do NOT use it to edit code or run builds.
 tools: Bash, Glob, Grep, Read, WebSearch, WebFetch
-model: sonnet
+model: claude-sonnet-5-5
+effort: high
 ---
 
 # Researcher
