@@ -1,12 +1,12 @@
 # delegate-kit
 
-**A curated bench of 7 specialist subagents for Claude Code — one of which runs the other six — and the playbook for when to delegate to which.**
+**A curated bench of 8 specialist subagents for Claude Code — one of which runs the other seven — and the playbook for when to delegate to which.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)
 ![One-command setup](https://img.shields.io/badge/setup-one%20command-brightgreen)
 
-Most agent collections give you a hundred role-experts (`react-expert`, `sql-expert`, …). **delegate-kit is the opposite: a small orchestration layer.** Seven subagents organized not by domain but by *reasoning depth and context cost*, plus a `/subagents` skill that teaches the main agent **when to hand work off, and to whom** — so your expensive main context stays clean and your hard thinking gets the strongest model. One of the seven, the **director**, is that layer made literal: run your session as it and you get a main agent that *cannot* touch a file, only delegate — so the expensive model spends its tokens deciding and the cheap ones do the work.
+Most agent collections give you a hundred role-experts (`react-expert`, `sql-expert`, …). **delegate-kit is the opposite: a small orchestration layer.** Eight subagents organized not by domain but by *reasoning depth and context cost*, plus a `/subagents` skill that teaches the main agent **when to hand work off, and to whom** — so your expensive main context stays clean and your hard thinking gets the strongest model. One of the eight, the **director**, is that layer made literal: run your session as it and you get a main agent that *cannot* touch a file, only delegate — so the expensive model spends its tokens deciding and the cheap ones do the work.
 
 ---
 
@@ -23,11 +23,12 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 
 | Agent | Model | Best at |
 |-------|-------|---------|
-| **director** | fable | **The agent you talk to.** Run your session as it — `/delegate-kit:director on` for a project, or `claude --agent director` for one terminal session — and its only tool is the ability to spawn the other six — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** on a small task, and **6–10× cheaper per unit of work** on large ones — but *more* expensive below ~35 tool calls. |
+| **director** | fable | **The agent you talk to.** Run your session as it — `/delegate-kit:director on` for a project, or `claude --agent director` for one terminal session — and its only tool is the ability to spawn the other seven — it cannot read, grep, edit or run anything. Every file touch happens in a cheaper agent's context; it decides from their reports. Measured at **−75% Fable tokens** on a small task, and **6–10× cheaper per unit of work** on large ones — but *more* expensive below ~35 tool calls. |
 | **super-thinker** | fable | Top-tier pure reasoning for the hardest, highest-stakes calls — subtle trade-offs, intricate plans, where depth beats speed. No file access. |
 | **thinker** | opus 5.5 (medium effort) | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No file access, pure thought. |
 | **researcher** | sonnet 5.5 (high effort) | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
 | **executer** | sonnet 5.5 (high effort) | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
+| **partitioner** | sonnet 5.5 (medium effort) | Planning only, before any executer is spawned. Takes a list of work units, runs the partition script, strikes false hits, and returns a schedule: layers, parallel clusters, commit tags, token estimates, and whether one agent is enough. Never edits source. See [Partition before you spawn](#partition-before-you-spawn). |
 | **simple-tasks** | haiku | Mechanical chores (commits, pushes, builds, file ops) **and** cheap multi-hop context-saving work. |
 | **bug-hunter** | haiku | Hunting real defects in a listed set of files or a diff. Never edits, never comments on style. Returns findings inline — or writes a JSON shard and returns one status line, so you can fan many out across a whole codebase. |
 
@@ -42,7 +43,7 @@ The **`/subagents`** skill is the playbook: it gives the main agent the roster, 
 ```
 
 The third step is required, and takes one prompt. `/delegate-kit:setup` detects which optional
-integrations this machine actually has, asks you to confirm, and writes the seven composed agent
+integrations this machine actually has, asks you to confirm, and writes the eight composed agent
 definitions to `~/.claude/agents/`. **Start a new session afterwards** — agent definitions load at
 session start.
 
@@ -53,7 +54,8 @@ You then have:
 - the **`/delegate-kit:subagents`** skill (the playbook),
 - **`/delegate-kit:director on`** — make this project's sessions start as the orchestrator,
 - **`/delegate-kit:run <objective>`** — hand off a single objective from a normal session, and
-- six spawnable specialists: `thinker`, `super-thinker`, `researcher`, `executer`, `simple-tasks`, `bug-hunter`.
+- seven spawnable specialists: `thinker`, `super-thinker`, `researcher`, `executer`, `partitioner`, `simple-tasks`, `bug-hunter`, and
+- the **`dk`** launcher (partition planner, bench, squash) in `~/.claude/delegate-kit/bin/` — setup prints its path, and [the next section](#partition-before-you-spawn) says what it's for.
 
 > **Why a setup step instead of shipping the agents directly?** Agent frontmatter is static — `tools:`
 > is read at load time with no conditionals — so a shipped definition would have to either grant tools
@@ -311,6 +313,44 @@ specific multiple as indicative. The mechanism underneath it is not observationa
 directly measured, mechanical, and model-independent. The direction of the effect is solid; the
 exact multiple is not.*
 
+## Partition before you spawn
+
+One executer was handed a whole "Stage 2": build a wrapper, migrate every provider, update the callers, wire the probes, run the suite. It did not loop. It was simply scoped across too many areas, and it finished with **131 tool calls, a 343k-token peak context and $8.07** of spend. The same work split into continuations ran at **47–70k peak and roughly $0.3–0.7 each**. (Measured with `dk bench` on the real transcripts. The prices in it are unverified defaults, so read the dollars as relative, not as a bill.)
+
+The fix is to scope and size the work at planning time, not to cut an agent off mid-run. There is no runtime cap of any kind: agents do what they're told, and control is how the work was cut. The sizing target is **about 100k tokens of peak context per agent, roughly 30 tool calls**. It is an input to the plan, not a limit.
+
+**The procedure, in brief** (the `/subagents` skill has the full version, and the director follows it too):
+
+1. Skip it for small jobs: one executer if it's about 15 files or fewer, 3 areas or fewer, and not shaped like "build X, then apply X everywhere".
+2. Otherwise write the work as units (`id, title, kind build|apply|wire|verify, seeds, depends_on`) and hand them to the **partitioner**. It runs the script, strikes false hits, clusters with judgment, records `base_sha`, and writes `schedule.json`.
+3. Interfaces build first. The builder returns a short contract digest that goes into every downstream brief.
+4. Each brief carries its cluster pointer and its commit tag. Clusters in the same layer run in parallel, because their write-sets don't overlap.
+5. Handbacks become new work for fresh agents. Nothing is resumed.
+6. One agent runs the full suite at the end, then `dk partition check --after` and the squash close the run.
+
+**The tools.** `dk` is a launcher that setup installs next to copies of the scripts. Call it as `sh ~/.claude/delegate-kit/bin/dk <command>`:
+
+| Command | What it does |
+|---|---|
+| `dk partition auto` | Greps each unit's seeds, collects per-file sizes, importers and tests, then layers, clusters and warns. Writes `partition.json`. |
+| `dk partition show <Cn>` | One cluster, compact: primary files, hit lines, the scoped test command, its siblings. This is what goes in a brief. |
+| `dk partition check --after` | Audits the commits after the run against the plan: `COLLISION`, `UNPLANNED` and `UNTAGGED` work. |
+| `dk bench` | Reads your Claude Code transcripts (a subagent `.jsonl`, a session, or a session id) and reports, per agent, requests, tool calls, peak context, cumulative input and cost. `--json` for machine output, `--price MODEL=IN,OUT,CW,CR` to override the rates. |
+| `dk squash` | Folds the run's commits into one per tag. See below. |
+
+The partition script is advisory. It exists so the planning agent spends few tokens, and nothing stops an agent from reading or editing anywhere.
+
+**Tag-and-squash commits.** Each agent commits its own work with the tag of its piece: `git add <explicit paths>`, then `git commit -m "[W3] what changed"`. One commit or many is fine, because the tag is what groups them. When the run is over, `dk squash` folds every tag into a single commit, starting from `base_sha`. It refuses on a dirty tree, never touches anything already pushed, and on a conflict it aborts and leaves history exactly as it was. The result is one commit per piece of work, with no coordination between parallel agents.
+
+**The git guard.** The plugin ships a `PreToolUse` hook (`hooks/git_guard.py`) that denies destructive git commands run through a subagent's `Bash`:
+
+- `stash`, `restore`, `clean`, `rebase`, `filter-branch`, `filter-repo`, `checkout` and `switch`,
+- `reset --hard` or `--merge`, `commit --amend`, `branch -D`,
+- `add -A`, `add .` and the other add-everything forms,
+- `push --force`, `--delete` and `--mirror`.
+
+`git add <paths>`, `commit`, `log`, `diff`, `status` and `show` pass. `checkout` and `switch` are blocked outright, since `checkout <file>` and `checkout <branch>` can't be told apart and either one disturbs a tree other agents are working in. The hook covers **subagents only**: your own session is untouched. It is a guardrail against habitual commands, not a sandbox. A determined `python -c "import subprocess..."` gets through, and it fails open, so a bug in the hook never blocks your agents.
+
 ## Integrations — the agents are wired for what you actually have
 
 Out of the box the agents navigate with built-in `Grep` / `Glob` / `Read` / `Bash` (plus
@@ -379,7 +419,7 @@ than silently dropping your whole grant.
   well inside Claude Code's default maximum spawn depth of 3, and no different from any normal
   session. The `/delegate-kit:run` hand-off path needs depth 2 (main → director → workers), still
   inside the default. If a director ever reports it has no way to spawn, raise
-  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`. Nothing else in the kit can recurse: the other six declare
+  `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`. Nothing else in the kit can recurse: the other seven declare
   explicit `tools:` lists with no spawn tool.
 - **Models** are pinned per agent in `templates/agents/*.md` frontmatter (`model:`). Change any to a
   model you have access to — e.g. if you don't have `fable`, set `super-thinker` (and `director`) to
@@ -422,6 +462,7 @@ delegate-kit/
 │   ├── super-thinker.md
 │   ├── researcher.md
 │   ├── executer.md
+│   ├── partitioner.md
 │   ├── simple-tasks.md
 │   └── bug-hunter.md
 ├── integrations/            # optional fragments (tool grants + prose)
@@ -429,8 +470,14 @@ delegate-kit/
 │   ├── graphify.md
 │   └── python.md
 ├── bin/
-│   ├── compose.py           # templates + fragments -> ~/.claude/agents
-│   └── check.py             # guards: composition is deterministic, no empty tool grants
+│   ├── compose.py           # templates + fragments -> ~/.claude/agents; installs scripts + dk
+│   ├── check.py             # guards: composition is deterministic, no empty tool grants, tooling runs
+│   ├── partition.py         # map / plan / check / show / auto — advisory work partitioner
+│   ├── bench.py             # per-agent tool calls, peak context, cost from your transcripts
+│   └── squash.py            # folds [Wn]-tagged commits into one per tag
+├── hooks/
+│   ├── hooks.json           # PreToolUse hook on Bash, auto-discovered at the plugin root
+│   └── git_guard.py         # denies destructive git for subagents (--selftest)
 ├── commands/
 │   ├── setup.md             # /delegate-kit:setup
 │   ├── run.md               # /delegate-kit:run — hand an objective to the director
@@ -442,6 +489,17 @@ delegate-kit/
 
 Note there is no `agents/` directory: composed definitions are installed to `~/.claude/agents/`, so
 exactly one definition per agent name exists. See the install section for why.
+
+Setup also installs the partition tooling outside the plugin, so agents can reach it (the plugin
+root isn't exported to a subagent's shell):
+
+```
+~/.claude/delegate-kit/bin/
+├── dk                       # sh launcher with the interpreter baked in
+├── partition.py
+├── bench.py
+└── squash.py
+```
 
 ## Contributing
 

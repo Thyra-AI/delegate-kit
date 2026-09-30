@@ -5,7 +5,7 @@ Thanks for helping improve delegate-kit! This project is intentionally **small a
 ## Good contributions
 
 - **Sharper briefing guidance** in `skills/subagents/SKILL.md` — clearer rules for when to pick each agent, better briefing templates.
-- **A new specialist agent** that fills a real gap the current seven don't cover. Open an issue first to discuss the gap.
+- **A new specialist agent** that fills a real gap the current eight don't cover. Open an issue first to discuss the gap.
 - **Portability fixes** — anything that assumes a specific OS, shell, model, or MCP server should degrade gracefully.
 
 ## Ground rules
@@ -33,3 +33,20 @@ Install your fork as a local marketplace and verify in a clean session:
 ```
 
 Confirm `/delegate-kit:subagents` loads and each agent is spawnable.
+
+Then run the repo's own checks from the repo root:
+
+```
+python bin/check.py
+python hooks/git_guard.py --selftest
+```
+
+`bin/check.py` composes into temporary directories (never your real `~/.claude`), checks that composition is deterministic and that every agent has a real `tools:` grant, and confirms the partition tooling installs and runs. `--selftest` asserts the git guard's allow and deny cases.
+
+One manual step, because it needs a real transcript and can't run in CI. Point the bench at the incident subagent log:
+
+```
+python bin/bench.py <path to the incident subagent jsonl>
+```
+
+It must reproduce **121 requests, 131 tool calls, 342,987 peak context and 26,462,114 cumulative input**. This is **machine-specific**: the transcript lives under `~/.claude/projects/` on the machine that ran it, so on any other machine there is nothing to reproduce it from. Run it if you changed `bin/bench.py`, and skip it otherwise.

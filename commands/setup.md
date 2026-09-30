@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, AskUserQuestion
 
 # delegate-kit — setup
 
-Compose the seven subagent definitions from the shipped templates plus whichever
+Compose the eight subagent definitions from the shipped templates plus whichever
 optional integrations this environment actually has, and install them to
 `~/.claude/agents`.
 
@@ -94,10 +94,14 @@ Tell the user:
 - which agents were written, and which integrations each ended up with (the script prints
   this per file — `thinker`, `super-thinker` and `director` take none by design: the first two
   have no file access, and the director's only tool is spawning the others);
+- that the partition tooling was installed too: `partition.py`, `bench.py` and `squash.py`, plus a
+  `dk` launcher, in `~/.claude/delegate-kit/bin/` (under `$CLAUDE_CONFIG_DIR` if that is set).
+  Compose prints the launcher path; repeat it to the user. Agents call it as
+  `sh ~/.claude/delegate-kit/bin/dk partition ...`;
 - that **a new session is required** — agent definitions load at session start, so the
   current session still has the old ones;
 - **how to use the `director`** — it is not spawned like the others, it's the agent you talk to.
-  Its only tool is spawning the other six, so every read and edit lands in a worker's context
+  Its only tool is spawning the other seven, so every read and edit lands in a worker's context
   instead of the expensive one. Give the project route first — it is the only one that
   works everywhere, the desktop app included, where there is no command line to pass a flag to:
   `/delegate-kit:director on`. The `claude --agent director` flag is the terminal-only, one-session
@@ -109,7 +113,7 @@ Tell the user:
   `.delegate-kit-backup`.
 
 Then check for the duplicate-definition trap and warn if it applies: if a **project**
-`.claude/agents/` directory defines any of the same seven names, or an older delegate-kit
+`.claude/agents/` directory defines any of the same eight names, or an older delegate-kit
 install is still enabled with its own `agents/`, those register alongside these and the
 model may spawn either. Name the conflicting paths; let the user decide what to remove.
 
