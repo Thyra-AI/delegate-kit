@@ -2,7 +2,7 @@
 name: graphify
 title: graphify — codebase knowledge graph
 detect_bin: graphify
-agents: researcher
+agents: researcher, partitioner
 tools:
 ---
 

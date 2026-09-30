@@ -3,7 +3,7 @@ name: serena
 title: Serena — symbol-precise code navigation
 url: https://github.com/oraios/serena
 detect_mcp: serena
-agents: executer, researcher, simple-tasks
+agents: executer, researcher, simple-tasks, partitioner
 tools: mcp__serena__activate_project, mcp__serena__initial_instructions, mcp__serena__find_symbol, mcp__serena__get_symbols_overview, mcp__serena__find_referencing_symbols, mcp__serena__find_implementations, mcp__serena__find_declaration, mcp__serena__search_for_pattern, mcp__serena__find_file, mcp__serena__list_dir, mcp__serena__get_diagnostics_for_file
 tools@simple-tasks: mcp__serena__activate_project, mcp__serena__initial_instructions, mcp__serena__find_symbol, mcp__serena__get_symbols_overview, mcp__serena__search_for_pattern, mcp__serena__find_file, mcp__serena__list_dir
 ---

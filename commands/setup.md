@@ -23,16 +23,28 @@ definition per agent.
 
 ## 1. Discover
 
+First pick the interpreter, once, and use it for every command below. Don't assume
+`python` is usable: on Windows it can be the Microsoft Store stub, and on older systems
+it can be Python 2. Verify it is 3.8 or newer:
+
 ```
-python "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --list
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"
+```
+
+Exit 0 means use `python`. Anything else (not found, stub, Python 2, too old) means run
+the same check with `python3` and use that one if it passes. Below, `<py>` stands for
+whichever passed.
+
+```
+<py> "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --list
 ```
 
 This prints every fragment found, in both the plugin's `integrations/` and the user's
 `~/.claude/delegate-kit/integrations/` (same name = the user's wins), each with a
 `detect_mcp` (an MCP server name), a `detect_bin` (an executable on PATH), or neither.
 
-If `python` isn't found, try `python3`, then `py -3`. If none work, stop and tell the
-user delegate-kit's setup needs Python 3 on PATH — don't try to compose by hand.
+If neither passes, try `py -3` (same check). If none work, stop and tell the user
+delegate-kit's setup needs Python 3.8+ on PATH — don't try to compose by hand.
 
 ## 2. Detect what's actually here
 
@@ -64,7 +76,7 @@ is a valid, working setup, just built-ins only.
 ## 4. Compose
 
 ```
-python "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --enable <comma,separated,names>
+<py> "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --enable <comma,separated,names>
 ```
 
 Pass `--enable ""` for none. Add `--dry-run` first if the user wants to see what changes
