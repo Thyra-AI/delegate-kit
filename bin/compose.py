@@ -288,7 +288,13 @@ def install_scripts(here: Path, config: Path, dry_run: bool) -> Path | None:
     if dry_run:
         print(f"would install {', '.join(n + '.py' for n in present)} and dk to {dest}")
         return launcher
+    for d in (config / "delegate-kit", dest):
+        if d.is_symlink():
+            sys.exit(f"refusing to install scripts: {d} is a symlink")
     dest.mkdir(parents=True, exist_ok=True)
+    for path in [dest / f"{n}.py" for n in present] + [launcher]:
+        if path.is_symlink():
+            path.unlink()
     for name in present:
         shutil.copyfile(src_dir / f"{name}.py", dest / f"{name}.py")
         print(f"wrote {dest / (name + '.py')}")

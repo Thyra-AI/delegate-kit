@@ -221,7 +221,7 @@ def judge(sub, rest):
                 return "commit --amend rewrites history (make a new commit instead)"
     elif sub == "branch":
         for a, fl in flags(rest):
-            if fl and (cluster_has(a, "Df") or opt_is(a, "--force", 4)):
+            if fl and (cluster_has(a, "DfMC") or opt_is(a, "--force", 4)):
                 return "forced branch delete/move"
     elif sub == "add":
         for a, fl in flags(rest):
@@ -360,6 +360,8 @@ DENY = [
     "git rebase -i HEAD~3",
     "git filter-branch --all",
     "git branch -D old",
+    "git branch -M stable",
+    "git branch -C x y",
     "git branch --force x HEAD",
     "git push -f",
     "git push --force-with-lease origin main",
