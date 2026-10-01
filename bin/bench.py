@@ -114,7 +114,7 @@ def analyze(path, prices):
             u = msg.get("usage") or {}
             g = groups.get(mid)
             if g is None:
-                g = groups[mid] = {"model": model, "in": 0, "cr": 0, "cc": 0, "out": 0, "final": False, "chars": 0}
+                g = groups[mid] = {"model": model, "in": 0, "cr": 0, "cc": 0, "out": 0, "final": False, "chars": 0, "seen": set()}
             g["model"] = g["model"] or model
             g["in"] = max(g["in"], u.get("input_tokens") or 0)
             g["cr"] = max(g["cr"], u.get("cache_read_input_tokens") or 0)
@@ -127,11 +127,18 @@ def analyze(path, prices):
                     continue
                 bt = b.get("type")
                 if bt == "thinking":
-                    g["chars"] += len(b.get("thinking") or "")
+                    body = b.get("thinking") or ""
                 elif bt == "text":
-                    g["chars"] += len(b.get("text") or "")
+                    body = b.get("text") or ""
                 elif bt == "tool_use":
-                    g["chars"] += len(json.dumps(b.get("input") or {}))
+                    body = json.dumps(b.get("input") or {}, sort_keys=True)
+                else:
+                    body = None
+                # A block repeated on a later line of the same response (a growing
+                # snapshot) is counted once; distinct blocks on split lines all count.
+                if body is not None and (bt, b.get("id"), body) not in g["seen"]:
+                    g["seen"].add((bt, b.get("id"), body))
+                    g["chars"] += len(body)
                 if bt != "tool_use":
                     continue
                 tid = b.get("id")
