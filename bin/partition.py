@@ -7,6 +7,7 @@
     python bin/partition.py show  <cluster-id> --plan partition.json
     python bin/partition.py auto  --wu wus.json [--repo .] [--out-dir DIR]
     python bin/partition.py calibrate --bench bench.json [...] --plan partition.json [...] [--out FILE]
+    python bin/partition.py --selftest      # exits non-zero on any mismatch
 
 A planning agent runs `auto` once, reads the table, and overrides it with
 judgment. Output is advisory: warnings never change the exit code, and `check`
@@ -141,6 +142,37 @@ def esc_ere(s):
     return re.sub(r"([.^$*+?(){}\[\]|\\])", r"\\\1", s)
 
 
+def ere_compatible(p):
+    """True if pattern `p` means the same as a Python regex and as a POSIX ERE (what
+    `git grep -E` speaks). Python-only syntax says False: groups starting `(?` (lookarounds,
+    inline flags, named groups), lazy/possessive quantifiers, and a backslash before a letter
+    or digit (class escapes like d/w/s/b, backreferences). The caller scans those in Python."""
+    i, n = 0, len(p)
+    in_class = False
+    while i < n:
+        c = p[i]
+        if c == "\\":
+            if i + 1 >= n or p[i + 1].isalnum():
+                return False
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+        elif c == "[":
+            in_class = True
+            if p[i + 1:i + 2] == "^":
+                i += 1
+            if p[i + 1:i + 2] == "]":
+                i += 1
+        elif c == "(" and p[i + 1:i + 2] == "?":
+            return False
+        elif c in "*+?}" and p[i + 1:i + 2] in ("?", "+"):
+            return False
+        i += 1
+    return True
+
+
 def run_git(args, cwd):
     cmd = ["git", "-c", "core.quotepath=off", "--no-pager"] + list(args)
     try:
@@ -266,33 +298,42 @@ class Repo(object):
         return lines
 
     def grep(self, patterns):
-        """[(path, lineno, text)] for lines matching any ERE in `patterns`."""
+        """[(path, lineno, text)] for lines matching any of `patterns`. Patterns that mean the
+        same as Python regex and ERE go to `git grep -E`; the rest (Python-only syntax), and
+        everything when git is unavailable or fails, are scanned in Python."""
         if not patterns:
             return []
-        if self.is_git:
+        ere = [p for p in patterns if ere_compatible(p)] if self.is_git else []
+        py = [p for p in patterns if p not in ere]
+        res = []
+        if ere:
             args = ["grep", "-n", "-I", "-E", "--untracked", "--no-color"]
-            for p in patterns:
+            for p in ere:
                 args += ["-e", p]
             rc, out = run_git(args, self.root)
             if rc in (0, 1):
-                res = []
                 for ln in out.split("\n"):
                     m = re.match(r"^(.+?):(\d+):(.*)$", ln)
                     if m:
                         res.append((posix(m.group(1)), int(m.group(2)), m.group(3)))
-                return res
-        try:
-            rx = re.compile("|".join("(?:%s)" % p for p in patterns))
-        except re.error:
-            return []
-        res = []
-        for path in self.files():
-            lines = self._lines(path)
-            if not lines:
-                continue
-            for i, text in enumerate(lines, 1):
-                if rx.search(text):
-                    res.append((path, i, text))
+            else:
+                py = list(patterns)
+        if py:
+            rxs = []
+            for p in py:
+                try:
+                    rxs.append(re.compile(p))
+                except re.error:
+                    pass
+            seen = set((path, ln) for path, ln, _ in res)
+            for path in self.files() if rxs else ():
+                lines = self._lines(path)
+                if not lines:
+                    continue
+                for i, text in enumerate(lines, 1):
+                    if (path, i) not in seen and any(rx.search(text) for rx in rxs):
+                        res.append((path, i, text))
+            res.sort(key=lambda r: (r[0], r[1]))
         return res
 
 
@@ -519,7 +560,7 @@ def map_tests(repo, finfo):
 
 
 def load_graph(root, head):
-    """Digest of graphify-out/graph.json or None. Skipped silently on any problem."""
+    """Digest of graphify-out/graph.json or None. An unusable graph is skipped with a warning."""
     gp = os.path.join(root, "graphify-out", "graph.json")
     if not os.path.isfile(gp):
         return None
@@ -549,7 +590,10 @@ def load_graph(root, head):
             except OSError:
                 pass
         return finish_graph(dg, commit, head)
-    except Exception:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        # ValueError covers JSONDecodeError; the rest are a graph.json of the wrong shape
+        sys.stderr.write("partition: ignoring unusable graph %s (%s: %s)\n" % (
+            posix(gp), type(e).__name__, clip(str(e), 80)))
         return None
 
 
@@ -675,6 +719,15 @@ def load_wus(path):
 # ---------------------------------------------------------------- plan
 
 
+def hits_per_hop_of(params):
+    """params["hits_per_hop"] if it is a positive number, else the default (never divide by 0)."""
+    try:
+        v = float(params.get("hits_per_hop"))
+    except (TypeError, ValueError):
+        return float(DEFAULTS["hits_per_hop"])
+    return v if v > 0 else float(DEFAULTS["hits_per_hop"])  # NaN and <= 0 fall through
+
+
 def estimate(files, params, wu_ids=(), kinds=None, sizes=None):
     """Sizing numbers only, from WU kinds (see DEFAULTS). `files` entries carry "wus", "hits",
     "planned", "lang"; `kinds` maps WU id -> kind (unknown or missing ids count as apply); `sizes`
@@ -682,6 +735,7 @@ def estimate(files, params, wu_ids=(), kinds=None, sizes=None):
     kinds = kinds or {}
     sizes = sizes or {}
     hops = 0.0
+    hph = hits_per_hop_of(params)
     if not wu_ids or any(kinds.get(w) != "research" for w in wu_ids):
         hops += float(params["hops_base"])
     for w in wu_ids:
@@ -707,9 +761,9 @@ def estimate(files, params, wu_ids=(), kinds=None, sizes=None):
                 else:
                     h = params["hops_doc_per_file"] if doc else params["hops_edit"]
             elif k == "fix":
-                h = params["hops_fix_per_file"] + f.get("hits", 0) / float(params["hits_per_hop"])
+                h = params["hops_fix_per_file"] + f.get("hits", 0) / hph
             else:
-                h = (params["hops_doc_per_file"] if doc else params["hops_per_file"]) + f.get("hits", 0) / float(params["hits_per_hop"])
+                h = (params["hops_doc_per_file"] if doc else params["hops_per_file"]) + f.get("hits", 0) / hph
             best = max(best, h)
         hops += best
     return int(params["overhead"] + hops * params["hop_tokens"]), int(round(hops))
@@ -951,6 +1005,8 @@ def build_plan(m, p):
     for f in sorted(allp):
         e = {"path": f, "planned": f not in finfo, "wus": [w for w in ids if f in fileset[w]],
              "hits": sum(byid[w]["hits"].get(f, {}).get("hits", 0) for w in ids)}
+        if f in finfo:
+            e["lang"] = finfo[f]["lang"]  # as in the per-cluster entries, so docs cost as docs
         alle.append(e)
     ak = {w: byid[w]["kind"] for w in ids}
     asz = {w: byid[w].get("size") for w in ids}
@@ -980,6 +1036,10 @@ def normalize(plan):
     """Re-derive layer/siblings/estimates from a (possibly hand-edited) plan."""
     params = dict(DEFAULTS)
     params.update(plan.get("params") or {})
+    if hits_per_hop_of(params) != params["hits_per_hop"]:
+        sys.stderr.write("partition: plan params hits_per_hop=%r is not > 0; using %g\n" % (
+            params["hits_per_hop"], DEFAULTS["hits_per_hop"]))
+        params["hits_per_hop"] = DEFAULTS["hits_per_hop"]
     plan["params"] = params
     plan["budget"] = plan.get("budget") or params["budget"]
     clusters = plan.get("clusters") or []
@@ -1278,6 +1338,16 @@ def add_map_args(p):
 
 # (key, type, help). Flag defaults are None so "not given" is distinguishable from "given" (flags
 # override calibration.json, which overrides DEFAULTS); the effective default is shown in the help.
+def pos_float(s):
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError("invalid number: %r" % s)
+    if not v > 0:
+        raise argparse.ArgumentTypeError("must be > 0 (got %s)" % s)
+    return v
+
+
 PLAN_FLAGS = [
     ("budget", int, "per-agent token budget (sizing input)"),
     ("overhead", int, "base context per agent in tokens; est_tokens = overhead + est_hops * hop_tokens"),
@@ -1288,7 +1358,7 @@ PLAN_FLAGS = [
     ("hops_new_large", float, "build WU with \"size\": \"large\": tool calls per planned new file"),
     ("hops_edit", float, "build WU: tool calls per existing file edited"),
     ("hops_per_file", float, "apply/wire WU: tool calls per file, plus hits/--hits-per-hop"),
-    ("hits_per_hop", float, "apply/wire/fix WU: seed hits handled per extra tool call"),
+    ("hits_per_hop", pos_float, "apply/wire/fix WU: seed hits handled per extra tool call"),
     ("hops_verify", float, "verify WU: tool calls per verify WU"),
     ("hops_doc_per_file", float, "docs files (markdown etc.) in apply/wire/build-edit: tool calls per file instead of hops_per_file/hops_edit"),
     ("hops_fix_per_file", float, "fix WU (apply review findings): tool calls per file, plus hits/--hits-per-hop"),
@@ -1540,7 +1610,153 @@ def cmd_auto(a):
     print("-> %s (+ partition.map.json)" % posix(pp))
 
 
+# ---------------------------------------------------------------- selftest
+
+
+def _map_wu(wid, kind, files, depends_on=(), readonly=False, size="medium"):
+    """A wus entry of a partition map: `files` is {path: hits} (or a list of planned paths)."""
+    planned = list(files) if isinstance(files, (list, tuple)) else []
+    hits = {} if planned else {f: {"hits": n, "hit_lines": [], "comment_hits": 0, "via": ["grep"]}
+                                for f, n in files.items()}
+    return {"id": wid, "title": wid, "kind": kind, "size": size, "readonly": readonly,
+            "depends_on": list(depends_on), "seeds": {}, "planned": planned,
+            "excluded": {"hits": 0, "files": 0}, "hits": hits}
+
+
+def _map_file(lang):
+    return {"lines": 10, "bytes": 400, "tokens_est": 100, "tokens_narrow": 100, "lang": lang,
+            "tests": [], "is_test": False}
+
+
+def selftest():
+    import contextlib
+    import io
+    import tempfile
+
+    cases = []  # (label, got, want)
+
+    def eq(label, got, want):
+        cases.append((label, got, want))
+
+    def quiet(fn, *a):
+        """Run fn with stderr captured -> (result or ("exit", code), stderr text)."""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            try:
+                r = fn(*a)
+            except SystemExit as e:
+                r = ("exit", e.code)
+        return r, buf.getvalue()
+
+    P = dict(DEFAULTS)
+    code = {"path": "a.py", "wus": ["W1"], "hits": 8, "lang": "python"}
+    doc = {"path": "a.md", "wus": ["W1"], "hits": 8, "lang": "docs"}
+    new = {"path": "n.py", "wus": ["W1"], "hits": 0, "planned": True}
+
+    # estimate(): (tokens, hops). hops = hops_base + per-file by kind; tokens = overhead + hops * hop_tokens
+    eq("est apply code", estimate([code], P, ["W1"], {"W1": "apply"}), (30000 + 11 * 2000, 11))  # 6 + 3 + 8/4
+    eq("est apply docs", estimate([doc], P, ["W1"], {"W1": "apply"}), (30000 + 13 * 2000, 13))  # 6 + 5 + 8/4
+    eq("est build new medium", estimate([new], P, ["W1"], {"W1": "build"}, {"W1": "medium"})[1], 26)
+    eq("est build new small", estimate([new], P, ["W1"], {"W1": "build"}, {"W1": "small"})[1], 14)
+    eq("est build new large", estimate([new], P, ["W1"], {"W1": "build"}, {"W1": "large"})[1], 36)
+    eq("est build edit docs vs code",
+       (estimate([doc], P, ["W1"], {"W1": "build"})[1], estimate([code], P, ["W1"], {"W1": "build"})[1]), (11, 9))
+    eq("est fix", estimate([code], P, ["W1"], {"W1": "fix"})[1], 19)  # 6 + 6 verify + 5 + 8/4
+    eq("est verify skips files", estimate([code], P, ["W1"], {"W1": "verify"})[1], 21)  # 6 + 15
+    eq("est research-only has no base", estimate([code], P, ["W1"], {"W1": "research"})[1], 10)  # 8 + 2
+    eq("est unknown kind = apply", estimate([code], P, ["W1"], {})[1], 11)
+    for bad in (0, -3, 0.0, None, "x", float("nan")):
+        r, _ = quiet(estimate, [code], dict(P, hits_per_hop=bad), ["W1"], {"W1": "apply"})
+        eq("est hits_per_hop=%r guarded" % (bad,), r, (30000 + 11 * 2000, 11))
+    eq("est hits_per_hop=2", estimate([code], dict(P, hits_per_hop=2), ["W1"], {"W1": "apply"})[1], 13)
+    eq("cli rejects --hits-per-hop 0", quiet(main, ["plan", "--map", "x.json", "--hits-per-hop", "0"])[0], ("exit", 2))
+    eq("cli rejects --hits-per-hop -1", quiet(main, ["plan", "--map", "x.json", "--hits-per-hop=-1"])[0], ("exit", 2))
+    eq("pos_float ok", pos_float("0.5"), 0.5)
+    norm, err = quiet(normalize, {"params": {"hits_per_hop": 0}, "clusters": []})
+    eq("normalize resets hits_per_hop", norm["params"]["hits_per_hop"], DEFAULTS["hits_per_hop"])
+    eq("normalize warns", "hits_per_hop" in err, True)
+
+    # compute_layers(): longest dependency chain, cycles reported and broken
+    w = []
+    eq("layers chain", compute_layers(["a", "b", "c"], {"a": ["b"], "b": ["c"], "c": []}, w), {"a": 2, "b": 1, "c": 0})
+    eq("layers chain has no warnings", w, [])
+    eq("layers diamond", compute_layers(["a", "b", "c", "d"], {"d": ["b", "c"], "b": ["a"], "c": ["a"]}, [])["d"], 2)
+    w = []
+    lay = compute_layers(["a", "b"], {"a": ["b"], "b": ["a"]}, w)
+    eq("layers cycle terminates", sorted(lay), ["a", "b"])
+    eq("layers cycle warns", [x["code"] for x in w], ["DEP_CYCLE"])
+    eq("reaches", (reaches({"a": ["b"], "b": ["c"]}, "a", "c"), reaches({"a": ["b"]}, "b", "a")), (True, False))
+
+    # build_plan(): union-find by write-set overlap within a layer
+    m = {"head": "", "files": {f: _map_file("python") for f in ("x.py", "y.py", "z.py", "w.py")},
+         "wus": [_map_wu("W1", "apply", {"x.py": 2}), _map_wu("W2", "apply", {"x.py": 1, "y.py": 1}),
+                 _map_wu("W3", "apply", {"z.py": 1}), _map_wu("W4", "apply", {"w.py": 1}, depends_on=["W1"]),
+                 _map_wu("W5", "apply", {"z.py": 1, "w.py": 1}, readonly=True)]}
+    plan = build_plan(m, dict(P))
+    eq("plan clusters by overlap", sorted(c["wus"] for c in plan["clusters"]), [["W1", "W2"], ["W3"], ["W4"], ["W5"]])
+    lay_of = {tuple(c["wus"]): c["layer"] for c in plan["clusters"]}
+    eq("plan layers", (lay_of[("W1", "W2")], lay_of[("W3",)], lay_of[("W4",)]), (0, 0, 1))
+    eq("plan readonly WU is not merged", [c["readonly"] for c in plan["clusters"] if c["wus"] == ["W5"]], [True])
+    eq("plan siblings", sorted(c["siblings"] for c in plan["clusters"] if c["layer"] == 0),
+       [["C1", "C2"], ["C1", "C3"], ["C2", "C3"]])
+    m2 = dict(m, wus=[_map_wu("W1", "apply", {"x.py": 1}), _map_wu("W2", "apply", {"x.py": 1}, depends_on=["W1"])])
+    plan2 = build_plan(m2, dict(P))
+    eq("plan dependent WUs stay apart", sorted(c["wus"] for c in plan2["clusters"]), [["W1"], ["W2"]])
+    # the single-agent aggregate costs docs as docs (same hops as the one cluster holding the file)
+    md = {"head": "", "files": {"r.md": _map_file("docs")}, "wus": [_map_wu("W1", "apply", {"r.md": 8})]}
+    pd = build_plan(md, dict(P))
+    eq("plan single-agent docs lang", (pd["single_agent_est"]["hops"], pd["clusters"][0]["est_hops"]), (13, 13))
+
+    # ere_compatible(): Python-only syntax must not reach `git grep -E`
+    for pat, want in (
+        ("foo", True), ("foo_bar\\.baz", True), ("a|b", True), ("foo(bar)+", True),
+        ("[a-z]+x", True), ("[]a]x", True), ("a[(?]b", True), ("\\(\\?", True), ("\\\\d", True),
+        ("^\\s*x", False), ("[\\d]", False), ("\\d+", False), ("\\w+", False), ("\\bfoo\\b", False),
+        ("(?:a|b)", False), ("(?<=x)y", False), ("(?i)x", False), ("a.*?b", False), ("a+?", False),
+        ("a{2}?", False), ("a*+", False), ("(a)\\1", False), ("x\\", False),
+    ):
+        eq("ere_compatible %r" % pat, ere_compatible(pat), want)
+
+    with tempfile.TemporaryDirectory() as d:
+        # Repo.grep() without git: Python scan for every pattern, bad regexes skipped
+        with open(os.path.join(d, "f.txt"), "w", encoding="utf-8") as f:
+            f.write("alpha 12\nbeta\nalpha x\n")
+        repo = Repo(d, False)
+        eq("grep python-only pattern", [(p, n) for p, n, _ in repo.grep([r"alpha \d+"])], [("f.txt", 1)])
+        eq("grep plain pattern", [n for _, n, _ in repo.grep(["alpha"])], [1, 3])
+        eq("grep bad pattern skipped", repo.grep(["(unclosed"]), [])
+
+        # load_graph(): silent when absent; warns on stderr and returns None when unusable
+        gdir = os.path.join(d, "graphify-out")
+        os.makedirs(gdir)
+        eq("graph absent", quiet(load_graph, d, ""), (None, ""))
+        gp = os.path.join(gdir, "graph.json")
+        for label, text in (("not json", "{nope"), ("list root", "[1, 2]"), ("bad nodes", '{"nodes": 5}')):
+            with open(gp, "w", encoding="utf-8") as f:
+                f.write(text)
+            r, err = quiet(load_graph, d, "")
+            eq("graph %s -> None" % label, r, None)
+            eq("graph %s warns" % label, err.startswith("partition: ignoring unusable graph"), True)
+        with open(gp, "w", encoding="utf-8") as f:
+            f.write('{"nodes": [{"id": "n1", "source_file": "a.py", "community": 1},'
+                    ' {"id": "n2", "source_file": "b.py", "community": 2}],'
+                    ' "links": [{"source": "n1", "target": "n2"}]}')
+        r, err = quiet(load_graph, d, "")
+        eq("graph ok", ((r or {}).get("community"), (r or {}).get("coupling"), err),
+           ({"a.py": 1, "b.py": 2}, [["a.py", "b.py", 1.0]], ""))
+
+    bad = 0
+    for label, got, want in cases:
+        if got != want:
+            bad += 1
+            print("FAIL %s: got %r, want %r" % (label, got, want))
+    print("partition selftest: %d cases, %d failed" % (len(cases), bad))
+    return 1 if bad else 0
+
+
 def main(argv=None):
+    if "--selftest" in (sys.argv[1:] if argv is None else argv):
+        return selftest()
     ap = argparse.ArgumentParser(prog="partition.py", description="Advisory work partitioner for subagent planning.")
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("map", help="grep seeds, collect per-file numbers, importers, tests")

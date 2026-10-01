@@ -26,7 +26,9 @@ Two properties matter enough to guard:
    real ~/.claude) installs byte-equal copies of bin/{partition,bench,squash}.py plus a
    `dk` launcher, and that launcher runs. Each script answers `--help`.
 
-5. **The git guard is wired.** `hooks/git_guard.py --selftest` passes, and
+5. **The self-tests pass.** `bin/partition.py --selftest` passes.
+
+6. **The git guard is wired.** `hooks/git_guard.py --selftest` passes, and
    `hooks/hooks.json` parses and points at a `hooks/git_guard.py` that exists.
 """
 import json
@@ -125,6 +127,10 @@ def check_scripts_and_guard():
         if r.returncode != 0:
             failures.append("git_guard.py --selftest failed:\n%s"
                             % (r.stdout + r.stderr).strip())
+    r = run_py(ROOT / "bin" / "partition.py", "--selftest")
+    if r.returncode != 0:
+        failures.append("partition.py --selftest failed:\n%s"
+                        % (r.stdout + r.stderr).strip())
     manifest = ROOT / "hooks" / "hooks.json"
     try:
         text = manifest.read_text(encoding="utf-8")

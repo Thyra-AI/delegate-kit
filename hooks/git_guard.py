@@ -189,7 +189,11 @@ def split_global(args):
 
 
 def opt_is(arg, name, minlen):
-    """Long option match including git's unambiguous-prefix abbreviations."""
+    """Long option match including git's unambiguous-prefix abbreviations.
+
+    `minlen` counts the leading `--`; per call site it is the shortest prefix that is
+    still unique among that subcommand's options (git rejects ambiguous ones anyway).
+    """
     return arg.startswith("--") and len(arg) >= minlen and name.startswith(arg.split("=", 1)[0])
 
 
@@ -213,7 +217,7 @@ def judge(sub, rest):
         return ALWAYS_DENY[sub]
     if sub == "reset":
         for a, fl in flags(rest):
-            if fl and (opt_is(a, "--hard", 4) or opt_is(a, "--merge", 4)):
+            if fl and (opt_is(a, "--hard", 3) or opt_is(a, "--merge", 4)):
                 return "reset --hard/--merge discards changes in a shared tree"
     elif sub == "commit":
         for a, fl in flags(rest):
@@ -225,7 +229,7 @@ def judge(sub, rest):
                 return "forced branch delete/move"
     elif sub == "add":
         for a, fl in flags(rest):
-            if fl and (cluster_has(a, "Au") or opt_is(a, "--all", 4) or opt_is(a, "--update", 4)):
+            if fl and (cluster_has(a, "Au") or opt_is(a, "--all", 3) or opt_is(a, "--update", 3)):
                 return "add explicit paths only (`git add <path> ...`), never the whole tree"
             if not fl and ADD_ALL_PATHSPEC.match(a):
                 return "add explicit paths only (`git add <path> ...`), never the whole tree"
@@ -235,8 +239,8 @@ def judge(sub, rest):
                 cluster_has(a, "fd")
                 or a.startswith("--force")
                 or opt_is(a, "--force", 4)
-                or opt_is(a, "--delete", 5)
-                or opt_is(a, "--mirror", 4)
+                or opt_is(a, "--delete", 4)
+                or opt_is(a, "--mirror", 3)
             ):
                 return "force/delete/mirror push"
             if not fl and len(a) > 1 and a[0] in "+:":
@@ -311,6 +315,21 @@ ALLOW = [
     "git push -u origin feature",
     "git reset HEAD a.py",
     "git reset --soft HEAD~1",
+    "git reset --mixed HEAD~1",
+    "git reset --keep HEAD~1",
+    "git reset --help",
+    "git reset --mi HEAD",
+    "git commit --all -m x",
+    "git commit --allow-empty -m x",
+    "git commit --author=x -m y",
+    "git add --dry-run a.py",
+    "git add --patch a.py",
+    "git add --intent-to-add a.py",
+    "git push --dry-run",
+    "git push --follow-tags origin main",
+    "git push --set-upstream origin main",
+    "git branch --format=%(refname)",
+    "git branch --delete merged",
     "git branch --list",
     "git branch -d merged",
     "cd x && git status",
@@ -337,6 +356,22 @@ DENY = [
     "FOO=1 BAR=2 git stash",
     "git reset --hard HEAD~1",
     "git reset --merge",
+    "git reset --h HEAD",
+    "git reset --ha HEAD~1",
+    "git reset --har",
+    "git reset --me",
+    "git commit --am",
+    "git commit --ame --no-edit",
+    "git add --a",
+    "git add --al",
+    "git add --u",
+    "git add --upd",
+    "git push --de origin old",
+    "git push --dele origin old",
+    "git push --m",
+    "git push --mir",
+    "git branch --forc x HEAD",
+    "git branch --fo x HEAD",
     "/usr/bin/git stash",
     "\"C:\\Program Files\\Git\\bin\\git.exe\" stash",
     "git --no-pager -c core.pager=cat stash list",
