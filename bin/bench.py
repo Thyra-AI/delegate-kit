@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bench.py - per-agent cost report from real Claude Code transcripts.
 
-    python bin/bench.py PATH [--json] [--price sonnet=2,10,2.5,0.2 ...]
+    python bin/bench.py PATH [--json] [--plan partition.json] [--price sonnet=2,10,2.5,0.2 ...]
 
 PATH is one of
   - a subagent transcript  (.../<sessionId>/subagents/agent-<id>.jsonl)
@@ -11,6 +11,11 @@ PATH is one of
 
 One row per agent: type, description, model, requests, tool calls (+ histogram),
 peak context, cumulative input, output, wall clock, files read / edited, cost.
+
+--plan partition.json (from `partition.py plan|auto`) adds a per-cluster table: agents are grouped
+by the leading `[Wn]` tag of their description (the orchestrator starts every spawned agent's
+description with its tag), and each cluster shows estimated vs actual peak, tool calls, cumulative
+input, output and cost. Without --plan the output is unchanged.
 
 Transcript quirks handled here: one API response is split over several lines
 sharing a `message.id` (input usage is identical, `output_tokens` is a
@@ -211,10 +216,110 @@ def fmt_cost(c, r):
     return "$%.2f%s" % (c, "+UNPRICED" if r["unpriced_requests"] else "")
 
 
+TAG_RE = re.compile(r"^\s*\[([^\]\s]+)\]")
+
+
+def kfmt(n):
+    if n is None:
+        return "-"
+    n = float(n)
+    if n >= 1e6:
+        return "%.2fM" % (n / 1e6)
+    if n >= 1000:
+        return "%.1fk" % (n / 1000.0)
+    return "%d" % n
+
+
+def cluster_rows(agents, plan):
+    """Group non-main agents by leading [Wn] tag onto the plan's clusters (a tag matches a cluster's
+    wus or commit_tag). Clusters nobody ran get agents=0; tags the plan does not know, and agents
+    without a tag, get their own trailing rows."""
+    tag_cluster = {}
+    for c in plan.get("clusters") or []:
+        for w in c.get("wus") or []:
+            tag_cluster[w] = c["id"]
+        t = (c.get("commit_tag") or "").strip("[]")
+        if t:
+            tag_cluster[t] = c["id"]
+    groups = collections.OrderedDict((c["id"], []) for c in plan.get("clusters") or [])
+    extra = collections.OrderedDict()
+    for r in agents:
+        if r["type"] == "main":
+            continue
+        m = TAG_RE.match(r["description"] or "")
+        tag = m.group(1) if m else None
+        cid = tag_cluster.get(tag)
+        if cid is not None:
+            groups[cid].append(r)
+        else:
+            extra.setdefault("[%s]" % tag if tag else "(untagged)", []).append(r)
+
+    def actual(rs):
+        costs = [r["cost"] for r in rs if r["cost"] is not None]
+        return {"agents": len(rs), "peak_context": max([r["peak_context"] for r in rs] or [0]),
+                "tool_calls": sum(r["tool_calls"] for r in rs),
+                "cumulative_input": sum(r["cumulative_input"] for r in rs),
+                "output": sum(r["output"] for r in rs),
+                "cost": sum(costs) if costs else None}
+
+    out = []
+    for c in plan.get("clusters") or []:
+        rs = groups[c["id"]]
+        row = {"cluster": c["id"], "tag": c.get("commit_tag") or "-", "wus": c.get("wus") or [],
+               "est_peak": c.get("est_tokens"), "est_tool_calls": c.get("est_hops"),
+               "est_cum_input": c.get("est_cum_input"), "est_output": c.get("est_output"),
+               "est_cost": c.get("est_cost")}
+        row.update(actual(rs))
+        out.append(row)
+    for tag, rs in extra.items():
+        row = {"cluster": "-", "tag": tag, "wus": [], "est_peak": None, "est_tool_calls": None,
+               "est_cum_input": None, "est_output": None, "est_cost": None}
+        row.update(actual(rs))
+        out.append(row)
+    return out
+
+
+def usd(c):
+    return "-" if c is None else "$%.2f" % c
+
+
+def emit(line):
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", "replace").decode("ascii"))
+
+
+def print_clusters(rows):
+    hdr = ("cluster", "tag", "agents", "peak est/act", "tools est/act", "cum_input est/act",
+           "output est/act", "cost est/act")
+    table = [hdr]
+    for r in rows:
+        ran = r["agents"] > 0
+
+        def pair(est, act, f):
+            return "%s/%s" % (f(est), f(act) if ran else "-")
+
+        table.append((r["cluster"], r["tag"], "%d" % r["agents"],
+                      pair(r["est_peak"], r["peak_context"], kfmt),
+                      pair(r["est_tool_calls"], r["tool_calls"], lambda v: "-" if v is None else "%d" % v),
+                      pair(r["est_cum_input"], r["cumulative_input"], kfmt),
+                      pair(r["est_output"], r["output"], kfmt),
+                      pair(r["est_cost"], r["cost"], usd)))
+    widths = [max(len(row[i]) for row in table) for i in range(len(hdr))]
+    for n, row in enumerate(table):
+        cells = [c.rjust(widths[i]) if i >= 2 else c.ljust(widths[i]) for i, c in enumerate(row)]
+        emit("  ".join(cells).rstrip())
+        if n == 0:
+            emit("  ".join("-" * w for w in widths))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Per-agent cost report from Claude Code transcripts.")
     ap.add_argument("path", metavar="PATH", help="subagent .jsonl, session dir / main .jsonl, or sessionId")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--plan", metavar="PLAN_JSON",
+                    help="partition.json: add a per-cluster est-vs-actual table, agents grouped by their [Wn] tag")
     ap.add_argument("--price", action="append", default=[], metavar="MODEL=IN,OUT,CW,CR",
                     help="override $/MTok for a model substring, e.g. sonnet=2,10,2.5,0.2 (repeatable)")
     args = ap.parse_args()
@@ -249,10 +354,24 @@ def main():
     tot["cost"] = sum(r["cost"] or 0.0 for r in rows)
     tot["unpriced_agents"] = sum(1 for r in rows if r["cost"] is None or r["unpriced_requests"])
 
+    crows = None
+    if args.plan:
+        try:
+            with open(args.plan, encoding="utf-8") as fh:
+                plan = json.load(fh)
+            if not isinstance(plan, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            sys.exit("bench: cannot read --plan %s: %s" % (args.plan, e))
+        crows = cluster_rows(rows, plan)
+
     if args.json:
         out = {"prices_per_mtok": {k: list(v) for k, v in prices.items()},
                "prices_note": "default prices are unverified",
                "agents": rows, "totals": tot}
+        if crows is not None:
+            out["plan"] = args.plan
+            out["clusters"] = crows
         print(json.dumps(out, indent=2))
         return
 
@@ -285,6 +404,10 @@ def main():
             print(line.encode("ascii", "replace").decode("ascii"))
         if n == 0 or n == len(table) - 2:
             print("  ".join("-" * w for w in widths))
+    if crows is not None:
+        print()
+        print("clusters by [Wn] tag (plan %s): estimate/actual" % args.plan)
+        print_clusters(crows)
 
 
 if __name__ == "__main__":
