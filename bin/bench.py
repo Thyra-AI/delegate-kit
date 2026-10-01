@@ -22,6 +22,15 @@ sharing a `message.id` (input usage is identical, `output_tokens` is a
 placeholder until the last line, so the max is taken), and tool calls are
 counted as distinct `tool_use` ids, not one per message.
 
+Unfinalized responses: a response normally ends with a line whose usage has the final
+`output_tokens` (it also carries `iterations` and a `stop_reason`). When that line was never written
+- the response that ends in a handback tool call (`SubagentHandback`), an interrupted run, and in
+some Claude Code versions most tool-call responses - every line keeps the streaming placeholder (`output_tokens` 1-7) however long the thinking
+and tool input were, so the real figure is not in the file. For those responses output is
+estimated as EST_TOK_PER_CHAR x the characters of the thinking/text/tool_use blocks (a lower bound:
+thinking text is a summary of the real thinking), and a row where the estimate is >= 10% of its
+output is marked `~`. `--json` always carries `output_estimated` and `unfinalized_requests`.
+
 Stdlib only, Python >= 3.8.
 """
 import argparse
@@ -40,6 +49,12 @@ PRICES = collections.OrderedDict([
     ("fable", (10.0, 50.0, 12.50, 0.25)),
     ("haiku", (1.0, 5.0, 1.25, 0.10)),
 ])
+
+
+# Output tokens per character of thinking/text/tool_use content. Calibrated on finalized responses
+# (median 0.38 for text/tool input, 0.7-0.8 when thinking is present), so this errs low.
+EST_TOK_PER_CHAR = 0.4
+EST_FLAG_SHARE = 0.10
 
 
 def price_for(model, prices):
@@ -99,14 +114,25 @@ def analyze(path, prices):
             u = msg.get("usage") or {}
             g = groups.get(mid)
             if g is None:
-                g = groups[mid] = {"model": model, "in": 0, "cr": 0, "cc": 0, "out": 0}
+                g = groups[mid] = {"model": model, "in": 0, "cr": 0, "cc": 0, "out": 0, "final": False, "chars": 0}
             g["model"] = g["model"] or model
             g["in"] = max(g["in"], u.get("input_tokens") or 0)
             g["cr"] = max(g["cr"], u.get("cache_read_input_tokens") or 0)
             g["cc"] = max(g["cc"], u.get("cache_creation_input_tokens") or 0)
             g["out"] = max(g["out"], u.get("output_tokens") or 0)
+            if msg.get("stop_reason") or "iterations" in u:
+                g["final"] = True
             for b in msg.get("content") or []:
-                if not isinstance(b, dict) or b.get("type") != "tool_use":
+                if not isinstance(b, dict):
+                    continue
+                bt = b.get("type")
+                if bt == "thinking":
+                    g["chars"] += len(b.get("thinking") or "")
+                elif bt == "text":
+                    g["chars"] += len(b.get("text") or "")
+                elif bt == "tool_use":
+                    g["chars"] += len(json.dumps(b.get("input") or {}))
+                if bt != "tool_use":
                     continue
                 tid = b.get("id")
                 if tid in tool_ids:
@@ -122,6 +148,15 @@ def analyze(path, prices):
                     elif name in ("Edit", "Write"):
                         edit_files.add(fp)
 
+    est_out = unfinal = 0
+    for g in groups.values():
+        if g["final"]:
+            continue
+        unfinal += 1
+        est = int(g["chars"] * EST_TOK_PER_CHAR)
+        if est > g["out"]:
+            est_out += est
+            g["out"] = est
     models = collections.Counter(g["model"] for g in groups.values() if g["model"])
     cost, unpriced = 0.0, False
     for g in groups.values():
@@ -140,6 +175,8 @@ def analyze(path, prices):
         "peak_context": max(ctx) if ctx else 0,
         "cumulative_input": sum(ctx),
         "output": sum(g["out"] for g in groups.values()),
+        "output_estimated": est_out,
+        "unfinalized_requests": unfinal,
         "wall_seconds": wall,
         "files_read": len(read_files),
         "files_edited": len(edit_files),
@@ -208,6 +245,14 @@ def fmt_tools(tools, n=3):
     if rest:
         parts.append("other:%d" % rest)
     return " ".join(parts) or "-"
+
+
+def est_flag(r):
+    return r["output_estimated"] > 0 and r["output_estimated"] >= EST_FLAG_SHARE * r["output"]
+
+
+def fmt_out(r):
+    return ("~" if est_flag(r) else "") + "{:,}".format(r["output"])
 
 
 def fmt_cost(c, r):
@@ -349,7 +394,7 @@ def main():
     rows.sort(key=lambda r: (r["type"] != "main", r["start"]))
 
     tot = {k: sum(r[k] for r in rows) for k in
-           ("requests", "tool_calls", "cumulative_input", "output", "files_read", "files_edited")}
+           ("requests", "tool_calls", "cumulative_input", "output", "files_read", "files_edited", "output_estimated", "unfinalized_requests")}
     tot["peak_context"] = max(r["peak_context"] for r in rows)
     tot["cost"] = sum(r["cost"] or 0.0 for r in rows)
     tot["unpriced_agents"] = sum(1 for r in rows if r["cost"] is None or r["unpriced_requests"])
@@ -386,7 +431,7 @@ def main():
         desc = desc if len(desc) <= 32 else desc[:29] + "..."
         table.append((r["type"], desc, r["model"] or "?", "%d" % r["requests"], "%d" % r["tool_calls"],
                       "{:,}".format(r["peak_context"]), "{:,}".format(r["cumulative_input"]),
-                      "{:,}".format(r["output"]), fmt_wall(r["wall_seconds"]),
+                      fmt_out(r), fmt_wall(r["wall_seconds"]),
                       "%d/%d" % (r["files_read"], r["files_edited"]), fmt_cost(r["cost"], r),
                       fmt_tools(r["tools"])))
     table.append(("TOTAL", "%d agent(s)" % len(rows), "", "%d" % tot["requests"], "%d" % tot["tool_calls"],
@@ -404,6 +449,12 @@ def main():
             print(line.encode("ascii", "replace").decode("ascii"))
         if n == 0 or n == len(table) - 2:
             print("  ".join("-" * w for w in widths))
+    if any(est_flag(r) for r in rows):
+        print()
+        print("~ output estimated from content size (>= %d%% of this row): the transcript kept only the "
+              "streaming placeholder usage for %d unfinalized response(s) (e.g. a handback call). "
+              "A lower bound; cost is computed from it." % (
+                  EST_FLAG_SHARE * 100, sum(r["unfinalized_requests"] for r in rows if est_flag(r))))
     if crows is not None:
         print()
         print("clusters by [Wn] tag (plan %s): estimate/actual" % args.plan)

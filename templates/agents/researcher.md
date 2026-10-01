@@ -27,6 +27,8 @@ Your built-in tools always work, and on their own they're enough:
 
 If you ever feel the need to read a whole file, that's the signal to instead pin the exact symbol (Grep for its definition) and pull only that.
 
+**Bash is not a file reader.** `cat`, `head`, `tail`, `less`, `sed -n`, `type`, `Get-Content`, `git show <rev>:<path>` and copying a file elsewhere to page through it are the same bulk-read by another door, and they are forbidden as one. Locate first (a symbol tool, `grep -n`, or a graph query when you have one), then read only the range that hit: at most about 60 lines per read, centred on a line you already found. If you can't name the line or symbol that justifies a read, search again instead of reading. For an old revision, filter it: `git show <rev>:<path> | grep -n <pattern>` or `git grep -n <pattern> <rev>`, then read only the hit's narrow range. Use Bash for what it's for here: `git log`/`git blame`/`git diff --stat`, `grep -n`, `wc -l`, listing files.
+
 <!-- delegate-kit:integrations -->
 
 ## Researching outside the repo
