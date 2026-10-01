@@ -20,7 +20,8 @@ Thanks for helping improve delegate-kit! This project is intentionally **small a
 1. Create `templates/agents/<name>.md` with `name`, `description`, `tools`, and `model` frontmatter. (The plugin ships no top-level `agents/` directory by design — definitions are composed from these templates into `~/.claude/agents/` by `/delegate-kit:setup`.)
 2. Write the `description` for triggering: primary use case first, in the third person, with the words a user would naturally say.
 3. Add a row to the roster table and a section in `skills/subagents/SKILL.md`.
-4. Test that it spawns and behaves in a project **without** any optional MCP servers installed.
+4. Give it a reporting section that follows the report-what-matters rule: decisions, what changed, what is open, risks and `path:line` anchors, with a stated line ceiling (about 15 unless its output is the product). No narration, no restated brief, no pasted logs.
+5. Test that it spawns and behaves in a project **without** any optional MCP servers installed.
 
 ## Testing your change
 

@@ -29,7 +29,7 @@ You may read anywhere, but you write only your assigned files. Sibling agents ma
 - **Edit your assigned files.** If the brief lists them, or points you at `sh ~/.claude/delegate-kit/bin/dk partition show <Cn> --plan <schedule.json>`, **run that first** to get your assignment: primary files, hit lines, scoped test command, and sibling clusters.
 - **A needed change in a sibling's file goes in your handback.** Don't edit it; say which file, what change, and why.
 - **A contract or interface change is a handback request, not an edit.** If the contract digest you were given doesn't work, stop that part and report what needs to change.
-- **A failure that survives two fix attempts is reported** with `path:line` and the verbatim output — don't keep digging.
+- **A failure that survives two fix attempts is reported** with `path:line` and the verbatim error lines that matter — don't keep digging.
 - **A sibling's failing file is noted, not fixed.** Report it and move on.
 
 ## How to work
@@ -55,11 +55,13 @@ You may read anywhere, but you write only your assigned files. Sibling agents ma
 - **Verify, don't assume.** After committing, confirm with `git status` / `git log -1` and report the actual SHA and branch. Never claim a commit you didn't make and see land.
 - Read-only git (`status`, `diff`, `log`) is fine and encouraged for orienting yourself before and after.
 
-## Reporting — condensed but complete
+## Reporting — only what matters, about 15 lines
 
-- **What changed** — every file touched, absolute paths, one line each on what and why.
-- **Judgment calls made** — the notable implementation decisions (reused X instead of adding Y, handled edge case Z), so the caller can veto cheaply.
-- **Verification** — the exact commands you ran and their actual results. Paste verbatim output for any failure, including pre-existing ones you didn't cause.
-- **Open items** — anything out of scope you noticed, anything you were told to skip, any question you bounced back.
+Report only what a later reader needs: decisions and conclusions, what changed (commit sha, files), what is still open, risks, and `path:line` anchors. No narration of the steps you took, no restating the brief, no pasted file contents, logs or full test output. The main agent can open your files and commits, and your full transcript stays on disk (`~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl`), so it consults those when it needs detail. It does not need them in your report. A ceiling of about 15 lines, not a target; shorter is better.
+
+- **Changed** — commit sha and branch, and the files touched (absolute paths, a few words each on what and why).
+- **Decisions** — the notable judgment calls (reused X instead of adding Y, handled edge case Z), so the caller can veto cheaply.
+- **Verified** — the commands you ran, one line each, with pass or fail. For a failure (including a pre-existing one you didn't cause), the `path:line` and the one or two error lines that matter, not the log.
+- **Open** — risks, anything out of scope you noticed, anything you were told to skip, any question you bounced back.
 
 Never say "done" or "passing" for anything you did not run and see pass. A precise "implemented, but test X fails with <output>" is a good report; a confident lie is the one unforgivable failure.

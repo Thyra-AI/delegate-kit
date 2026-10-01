@@ -28,11 +28,13 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 | **thinker** | opus 5.5 (medium effort) | Everyday deep reasoning over context you already have — trade-offs, planning, debugging-by-reasoning. No file access, pure thought. |
 | **researcher** | sonnet 5.5 (high effort) | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
 | **executer** | sonnet 5.5 (high effort) | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
-| **partitioner** | sonnet 5.5 (medium effort) | Planning only, before any executer is spawned. Takes a list of work units, runs the partition script, strikes false hits, and returns a schedule: layers, parallel clusters, commit tags, token estimates, and whether one agent is enough. Never edits source. See [Partition before you spawn](#partition-before-you-spawn). |
+| **partitioner** | sonnet 5.5 (medium effort) | Planning only, before any executer is spawned. Takes a list of work units, runs the partition script, strikes false hits, and returns a schedule: layers, parallel clusters, commit tags, token and cost estimates, and whether one agent is enough. Never edits source. See [Partition before you spawn](#partition-before-you-spawn). |
 | **simple-tasks** | haiku | Mechanical chores (commits, pushes, builds, file ops) **and** cheap multi-hop context-saving work. |
 | **bug-hunter** | haiku | Hunting real defects in a listed set of files or a diff. Never edits, never comments on style. Returns findings inline — or writes a JSON shard and returns one status line, so you can fan many out across a whole codebase. |
 
 The **`/subagents`** skill is the playbook: it gives the main agent the roster, briefing rules for each agent, and a decision guide for picking the right one — including the classic chain **researcher maps → thinker decides → executer builds, verifies & commits**. Run your session as the **director** and it applies that playbook itself, on every turn, without you having to.
+
+**Reports carry only what matters.** Every agent reports decisions and conclusions, what changed (commit sha, files), what is still open, risks, and `path:line` anchors. No narration of the steps taken, no restating the brief, no pasted file contents, logs or full test output. The detail still exists: each agent's full transcript stays on disk (`~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl`), and the files and commits speak for themselves, so you consult those when you need them. The ceilings are about 15 lines for executer, simple-tasks, bug-hunter (inline) and partitioner, about 25 for researcher, and about 60 for thinker and super-thinker, whose output is the product. They are ceilings, not targets.
 
 ## Install
 
@@ -322,20 +324,24 @@ The fix is to scope and size the work at planning time, not to cut an agent off 
 **The procedure, in brief** (the `/subagents` skill has the full version, and the director follows it too):
 
 1. Skip it for small jobs: one executer if it's about 15 files or fewer, 3 areas or fewer, and not shaped like "build X, then apply X everywhere".
-2. Otherwise write the work as units (`id, title, kind build|apply|wire|verify, seeds, depends_on`) and hand them to the **partitioner**. It runs the script, strikes false hits, clusters with judgment, records `base_sha`, and writes `schedule.json`.
+2. Otherwise write the work as units (`id, title, kind build|apply|wire|verify|fix|research, seeds, depends_on`) and hand them to the **partitioner**. It runs the script, strikes false hits, clusters with judgment, records `base_sha`, and writes `schedule.json`.
 3. Interfaces build first. The builder returns a short contract digest that goes into every downstream brief.
-4. Each brief carries its cluster pointer and its commit tag. Clusters in the same layer run in parallel, because their write-sets don't overlap.
+4. Each brief carries its cluster pointer and its commit tag, and the orchestrator starts every spawned agent's `description` with that `[Wn]` tag (for example `[W3] squash + guard`), which is what links a transcript to its piece. Clusters in the same layer run in parallel, because their write-sets don't overlap.
 5. Handbacks become new work for fresh agents. Nothing is resumed.
-6. One agent runs the full suite at the end, then `dk partition check --after` and the squash close the run.
+6. One agent runs the full suite at the end. Review findings are re-partitioned into `fix` units instead of being bundled into a few big fix agents (measured: four fix agents at 186-299k peak cost $20 of an $85 session). Then `dk partition check --after` and the squash close the run.
+7. After a partitioned run, `dk partition calibrate` refits the estimates from what the run really cost.
+
+**Work kinds.** `build`, `apply`, `wire` and `verify` are the build chain. `fix` is applying review findings. `research` is read-only: it never collides with anything, runs in parallel with anything, and gets no commit tag, so a large audit is split into `research` units rather than handed to one researcher.
 
 **The tools.** `dk` is a launcher that setup installs next to copies of the scripts. Call it as `sh ~/.claude/delegate-kit/bin/dk <command>`:
 
 | Command | What it does |
 |---|---|
-| `dk partition auto` | Greps each unit's seeds, collects per-file sizes, importers and tests, then layers, clusters and warns. Writes `partition.json`. |
+| `dk partition auto` | Greps each unit's seeds, collects per-file sizes, importers and tests, then layers, clusters and warns. Shows est $ and cumulative input per cluster. Writes `partition.json`. |
 | `dk partition show <Cn>` | One cluster, compact: primary files, hit lines, the scoped test command, its siblings. This is what goes in a brief. |
 | `dk partition check --after` | Audits the commits after the run against the plan: `COLLISION`, `UNPLANNED` and `UNTAGGED` work. |
-| `dk bench` | Reads your Claude Code transcripts (a subagent `.jsonl`, a session, or a session id) and reports, per agent, requests, tool calls, peak context, cumulative input and cost. `--json` for machine output, `--price MODEL=IN,OUT,CW,CR` to override the rates. |
+| `dk bench` | Reads your Claude Code transcripts (a subagent `.jsonl`, a session, or a session id) and reports, per agent, requests, tool calls, peak context, cumulative input and cost. `--json` for machine output, `--price MODEL=IN,OUT,CW,CR` to override the rates. With `--plan schedule.json` it prints estimated vs actual per piece, matching agents to pieces by the `[Wn]` tag in their description. |
+| `dk partition calibrate --bench <bench.json> --plan <schedule.json>` | Refits the estimate constants from real runs (`bench.json` is `dk bench <session> --json`) and writes them to `~/.claude/delegate-kit/calibration.json`, which `plan` loads automatically. Worth running after every partitioned run. |
 | `dk squash` | Folds the run's commits into one per tag. See below. |
 
 The partition script is advisory. It exists so the planning agent spends few tokens, and nothing stops an agent from reading or editing anywhere.
@@ -349,7 +355,7 @@ The partition script is advisory. It exists so the planning agent spends few tok
 - `add -A`, `add .` and the other add-everything forms,
 - `push --force`, `--delete` and `--mirror`.
 
-`git add <paths>`, `commit`, `log`, `diff`, `status` and `show` pass. `checkout` and `switch` are blocked outright, since `checkout <file>` and `checkout <branch>` can't be told apart and either one disturbs a tree other agents are working in. The hook covers **subagents only**: your own session is untouched. It is a guardrail against habitual commands, not a sandbox. A determined `python -c "import subprocess..."` gets through, and it fails open, so a bug in the hook never blocks your agents.
+`git add <paths>`, `commit`, `log`, `diff`, `status` and `show` pass. `checkout` and `switch` are blocked outright, since `checkout <file>` and `checkout <branch>` can't be told apart and either one disturbs a tree other agents are working in. The hook covers **subagents only**: your own session is untouched. It is a guardrail against habitual commands, not a sandbox. It doesn't catch `bash -c` in every form, `$(...)`, aliases, or `python -c "import subprocess..."`, and it fails open, so a bug in the hook never blocks your agents.
 
 ## Integrations — the agents are wired for what you actually have
 

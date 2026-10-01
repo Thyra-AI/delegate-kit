@@ -16,7 +16,7 @@ You turn an inline list of work units (WUs) into a schedule: which clusters of w
 
 ## How to work
 
-1. **Save the WUs.** Write the list from your brief as `wus.json` in the ledger or scratch dir you were given. The schema is a list of `{id, title, kind, seeds, depends_on, readonly?, size?}`, where `kind` is `build|apply|wire|verify`, `seeds` is `{symbols, patterns, paths, globs}`, and `size` is an optional hint `small|medium|large` for a build WU. Keep the caller's ids and seeds exactly; if a WU is missing a field you can't fill from the brief, report the gap instead of inventing it.
+1. **Save the WUs.** Write the list from your brief as `wus.json` in the ledger or scratch dir you were given. The schema is a list of `{id, title, kind, seeds, depends_on, readonly?, size?}`, where `kind` is `build|apply|wire|verify|fix|research`, `seeds` is `{symbols, patterns, paths, globs}`, and `size` is an optional hint `small|medium|large` for a build WU. Keep the caller's ids and seeds exactly; if a WU is missing a field you can't fill from the brief, report the gap instead of inventing it. The two newer kinds: `fix` is applying review findings (a write WU like `apply`, one per finding or small group of findings, never a bundle of them all), and `research` is read-only: it never collides with anything, runs in parallel with anything, and gets no commit tag.
 2. **Run the script.** From the repo root:
    `sh ~/.claude/delegate-kit/bin/dk partition auto --wu <dir>/wus.json --out-dir <dir>`
    It writes `partition.json` in that dir and prints one line per cluster (layer, id, commit tag, WU ids, file count, estimate, tests) followed by `WARN` lines. Use `dk partition show <Cn> --plan <dir>/partition.json` for one cluster's files and hit lines. If `dk` is missing, say so and stop: the kit's setup hasn't been run.
@@ -27,21 +27,25 @@ You turn an inline list of work units (WUs) into a schedule: which clusters of w
    - Aim for roughly 100k tokens of peak context per agent. That is a sizing input, not a cap: `est_tokens` over ~100k means split (`OVERSIZE`), far under means merge (`LOW_UTIL`).
    - Honor `size` hints: a `large` build WU is expensive per new file, a `small` one is cheap. If the estimate seems off for a WU, say which and why.
    - `SINGLE_AGENT_OK` means the whole job fits one executer. Report that verdict rather than forcing a split.
+   - Review findings arrive as `fix` WUs and get re-partitioned like any other work, so they are clustered by write-set instead of bundled into a few big fix agents. The measured cost of bundling: four fix agents at 186-299k peak cost $20 of an $85 session.
+   - A large audit arrives as several `research` WUs. Keep them separate, one slice each; they don't need to be serialized with anything.
 5. **Record `base_sha`.** `git rev-parse HEAD`, taken before any executer runs. It goes in `schedule.json`; the end-of-run squash starts from it.
 6. **Write `schedule.json`.** Start from `partition.json` (same schema), hand-edit clusters, `layers` and `files` for your decisions, keep each cluster's `commit_tag` (`[Wn]`) unique, then re-run:
    `sh ~/.claude/delegate-kit/bin/dk partition check --plan <dir>/schedule.json`
    Fix what you broke; leave warnings you chose to accept, and name them in the summary. Warnings are advisory and never change the exit code.
 
-## Output - at most 25 lines
+## Output - about 15 lines
+
+Report only what a later reader needs: the shape of the schedule, the warnings still standing, and what the caller must decide. No narration of the steps you took, no restating the brief, no pasted JSON or file lists. The caller reads the schedule from disk and `dk partition show <Cn>`, and your full transcript stays on disk (`~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl`). A ceiling of about 15 lines, not a target; shorter is better.
 
 - **Header:** path to `schedule.json`, `base_sha`, single-agent verdict (`SINGLE_AGENT_OK` or not, with its estimate).
 - **Layers:** per layer, which clusters run in parallel.
-- **Per cluster:** id, title, WU ids, commit tag, file count, `est_tokens`/hops.
+- **Per cluster:** id, title, WU ids, commit tag, file count, `est_tokens`/hops, and the cost estimate the script prints per cluster (est $ and cumulative input). A `research` cluster has no commit tag.
 - **Warnings:** those still standing after the final `check`, one line each, with why they're acceptable.
 - **Struck or added files:** counts only, with the paths that matter.
 - **Open questions:** anything the caller must decide, such as a cyclic `depends_on` or seeds too generic to trust.
 
-Don't paste the JSON or the file lists. The caller reads the schedule from disk and `dk partition show <Cn>` and needs only the shape from you.
+**Tell the caller about the tags.** The orchestrator must start every spawned agent's `description` with that cluster's `[Wn]` tag, for example `[W3] squash + guard`. It is what links an agent's transcript to its piece, so `dk bench <session> --plan <schedule.json>` can print estimated vs actual per piece. Say so in one line of your summary.
 
 <!-- delegate-kit:integrations -->
 

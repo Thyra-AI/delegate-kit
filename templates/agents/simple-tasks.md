@@ -35,9 +35,9 @@ You may read anywhere, but you change only what your route names. Sibling agents
 - **Do your assigned files and steps.** If the brief points you at `sh ~/.claude/delegate-kit/bin/dk partition show <Cn> --plan <schedule.json>`, **run that first** to get your assignment.
 - **A needed change in a sibling's file goes in your handback.** Don't make it; say which file, what change, and why.
 - **A contract or interface change is a handback request, not an edit.**
-- **A failure that survives two fix attempts is reported** with `path:line` and the verbatim output — don't keep digging.
+- **A failure that survives two fix attempts is reported** with `path:line` and the verbatim error lines that matter — don't keep digging.
 - **A sibling's failing file is noted, not fixed.**
-- **Plan-closing runs:** when asked to close a partitioned run, run `sh ~/.claude/delegate-kit/bin/dk partition check --plan <schedule.json> --after`, then `sh ~/.claude/delegate-kit/bin/dk squash --plan <schedule.json>`, and report both outputs verbatim. A squash that reports "unsquashed" is a result to report, not an error to fix.
+- **Plan-closing runs:** when asked to close a partitioned run, run `sh ~/.claude/delegate-kit/bin/dk partition check --plan <schedule.json> --after`, then `sh ~/.claude/delegate-kit/bin/dk squash --plan <schedule.json>`, and report the verdict lines of both verbatim (the `COLLISION`, `UNPLANNED` and `UNTAGGED` lines, and the squash result), not the whole output. A squash that reports "unsquashed" is a result to report, not an error to fix. When also asked to calibrate, run `sh ~/.claude/delegate-kit/bin/dk bench <session> --plan <schedule.json>` for estimated vs actual per piece, then `sh ~/.claude/delegate-kit/bin/dk partition calibrate --bench <bench.json> --plan <schedule.json>` (`<bench.json>` is the `--json` output of `dk bench`), and report the per-piece table's outliers and the path the calibration was written to.
 
 ## Git ownership
 
@@ -47,13 +47,13 @@ You fully own git operations, **including commits and pushes**. When committing:
 - Run the commit, then confirm with `git status` / `git log -1` and report the actual result.
 - **Blocked commands.** A plugin hook blocks these for subagents, so never try them: `stash`, `restore`, `clean`, `rebase`, `checkout`, `switch`, `filter-branch`; `reset --hard`/`--merge`, `commit --amend`, `branch -D`; `add -A`/`-u`/`--all`/`.`/`:/`/`*`; force or delete pushes. If one seems necessary, report back instead. (`dk squash` is the one sanctioned history rewrite, and it does its own git calls.)
 
-## Reporting — condensed but complete
+## Reporting — only what matters, about 15 lines
 
-Report back short, but include every piece of information that matters:
-- **What you ran** — the key commands (not every keystroke).
-- **What happened** — exit status, the commit SHA, branch, files changed, or the build result.
-- **For multi-hop / gather tasks** — the findings themselves with exact `path:line` anchors, so the caller can act from your report without re-walking the trail. Report the *result* of the hops, not a play-by-play of every tool call.
-- **Verbatim output for anything that failed or is non-obvious** — paste the actual error text and exit code. Never summarize an error as "it failed"; show it.
-- **Blockers / questions**, if any.
+Report only what a later reader needs: decisions and conclusions, what changed (commit sha, files), what is still open, risks, and `path:line` anchors. No narration of the steps you took, no restating the brief, no pasted file contents, logs or full test output. The main agent can open your files and commits, and your full transcript stays on disk (`~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl`), so it consults those when it needs detail. It does not need them in your report. A ceiling of about 15 lines, not a target; shorter is better.
 
-Trim the noise, keep the signal. The caller must be able to fully trust your report without re-running anything.
+- **What happened** — exit status, the commit sha, branch and files changed, or the build result. Name the key commands only where they matter, not every keystroke.
+- **For multi-hop / gather tasks** — the findings themselves with exact `path:line` anchors, so the caller can act without re-walking the trail. Report the *result* of the hops, not a play-by-play.
+- **For anything that failed or is non-obvious** — the exit code and the verbatim error lines that matter, a few lines and not the whole log. Never summarize an error as "it failed"; show the line that says why.
+- **Open** — blockers, risks, questions, if any.
+
+The caller must be able to trust your report without re-running anything, so never claim a result you didn't see.

@@ -79,13 +79,15 @@ Style, naming, formatting, comments, docstrings, type annotations, logging verbo
 
 **Snippets are checked.** Every snippet must be 1-3 lines copied **verbatim** from the file, with any line-number prefix stripped. It is **code only** — never append a note, an ellipsis, or a phrase like "with no close" to it, and never paraphrase; anything you want to say *about* the code belongs in `claim`. Callers commonly re-open the file and match the snippet against the line you claimed, so a snippet carrying your own words fails that check and the finding is thrown out. Never guess a line number.
 
-**Default — inline.** Return the findings themselves, highest confidence first, one block each. The second line is the bare snippet — code only, exactly as the rule above requires:
+**Default — inline.** Return the findings themselves, highest confidence first. Report only what matters: no narration of what you read, no description of the code, no restating the brief. The main agent can open the files, and your full transcript stays on disk (`~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl`). Keep the whole inline report to about 15 lines, a ceiling and not a target. Write the top findings as full blocks, the second line being the bare snippet — code only, exactly as the rule above requires:
 
 > `path/to/file.ext:142-148` — **high** · 0.85 · `async.missing_await`
 > `result = session.execute(stmt)`
 > **Claim:** one sentence — what is wrong.
 > **Scenario:** trigger → wrong behavior, 60 words max.
 > **Fix:** 25 words max.
+
+Once the full blocks would pass about 15 lines, write each remaining finding as one line (`path:line` · severity · class · the claim in 12 words or fewer, no snippet) rather than dropping it. The caller re-opens the file at that line to confirm.
 
 Close with exactly one line: `reviewed N files, F findings (H high)`. Nothing else — no description of what the code does, no file listing, no "overall this is well-structured".
 

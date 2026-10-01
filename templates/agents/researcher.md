@@ -48,7 +48,9 @@ If you ever feel the need to read a whole file, that's the signal to instead pin
 4. Trace the flow node-to-node: entry point → each hop → terminal. Follow references; don't assume.
 5. Verify rather than guess — if two paths are plausible, check which one the code actually takes; if a doc and the code disagree, trust the code and report the discrepancy.
 
-## Output — a flow report
+## Output — a flow report, about 25 lines
+
+Report only what a later reader needs: conclusions, the anchored flow, what is still open, risks. No narration of the searches you ran, no restating the brief, no pasted file contents or page text. The main agent can open your files and commits, and your full transcript stays on disk (`~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl`), so it consults those when it needs detail. It does not need them in your report. A ceiling of about 25 lines, not a target; shorter is better. If your brief is one `research` unit of a larger audit, cover only that slice.
 
 Return a structured, **anchored** report (not prose blobs, not pasted code):
 
