@@ -37,10 +37,12 @@ import argparse
 import collections
 import datetime
 import glob
+import hashlib
 import json
 import os
 import re
 import sys
+import tempfile
 
 # $/MTok: input, output, cache write, cache read. UNVERIFIED defaults.
 PRICES = collections.OrderedDict([
@@ -122,6 +124,7 @@ def analyze(path, prices):
             g["out"] = max(g["out"], u.get("output_tokens") or 0)
             if msg.get("stop_reason") or "iterations" in u:
                 g["final"] = True
+            occ = collections.Counter()  # per-line occurrence of each block key
             for b in msg.get("content") or []:
                 if not isinstance(b, dict):
                     continue
@@ -135,10 +138,16 @@ def analyze(path, prices):
                 else:
                     body = None
                 # A block repeated on a later line of the same response (a growing
-                # snapshot) is counted once; distinct blocks on split lines all count.
-                if body is not None and (bt, b.get("id"), body) not in g["seen"]:
-                    g["seen"].add((bt, b.get("id"), body))
-                    g["chars"] += len(body)
+                # snapshot) is counted once. Identical blocks within ONE line are
+                # distinct blocks, so the key carries their occurrence index on the
+                # line. Only a digest is kept, not the body.
+                if body is not None:
+                    base = (bt, b.get("id"), hashlib.sha1(body.encode("utf-8", "replace")).digest())
+                    key = base + (occ[base],)
+                    occ[base] += 1
+                    if key not in g["seen"]:
+                        g["seen"].add(key)
+                        g["chars"] += len(body)
                 if bt != "tool_use":
                     continue
                 tid = b.get("id")
@@ -188,6 +197,7 @@ def analyze(path, prices):
         "files_read": len(read_files),
         "files_edited": len(edit_files),
         "cost": None if (unpriced and cost == 0.0) else cost,
+        "content_chars": sum(g["chars"] for g in groups.values()),
         "unpriced_requests": sum(1 for g in groups.values() if price_for(g["model"], prices) is None),
         "start": t_first.isoformat() if t_first else "",
     }
@@ -366,7 +376,42 @@ def print_clusters(rows):
             emit("  ".join("-" * w for w in widths))
 
 
+def selftest():
+    """Content-size estimate for unfinalized responses: dedup across split lines."""
+    def line(mid, blocks):
+        return {"type": "assistant", "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"id": mid, "model": "claude-sonnet-x",
+                            "usage": {"input_tokens": 1, "output_tokens": 2}, "content": blocks}}
+    th = {"type": "thinking", "thinking": "t" * 1000}
+    tx = {"type": "text", "text": "x" * 500}
+    tu1 = {"type": "tool_use", "id": "u1", "name": "Bash", "input": {"a": 1, "b": "y" * 200}}
+    tu1r = {"type": "tool_use", "id": "u1", "name": "Bash", "input": {"b": "y" * 200, "a": 1}}
+    one = len(json.dumps(tu1["input"], sort_keys=True))
+    cases = [
+        ("snapshot repeat counted once", [line("m", [th]), line("m", [th]), line("m", [tx])], 1500),
+        ("distinct blocks on split lines", [line("m", [th]), line("m", [tx])], 1500),
+        ("identical blocks in one line both count", [line("m", [tx, tx])], 1000),
+        ("snapshot of a two-identical-block line", [line("m", [tx, tx]), line("m", [tx, tx])], 1000),
+        ("tool input key order ignored", [line("m", [tu1]), line("m", [tu1r])], one),
+        ("separate responses not merged", [line("m1", [th]), line("m2", [th])], 2000),
+    ]
+    failed = 0
+    tmp = tempfile.mkdtemp(prefix="bench-selftest-")
+    for i, (name, lines, want_chars) in enumerate(cases):
+        fp = os.path.join(tmp, "agent-%d.jsonl" % i)
+        with open(fp, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(json.dumps(l) for l in lines))
+        got = analyze(fp, PRICES).get("content_chars")
+        if got != want_chars:
+            failed += 1
+            print("FAIL %s: chars %r, want %r" % (name, got, want_chars))
+    print("bench selftest: %d cases, %d failed" % (len(cases), failed))
+    return 1 if failed else 0
+
+
 def main():
+    if sys.argv[1:] == ["--selftest"]:
+        sys.exit(selftest())
     ap = argparse.ArgumentParser(description="Per-agent cost report from Claude Code transcripts.")
     ap.add_argument("path", metavar="PATH", help="subagent .jsonl, session dir / main .jsonl, or sessionId")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
