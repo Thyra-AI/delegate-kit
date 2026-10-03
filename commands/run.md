@@ -2,7 +2,7 @@
 name: run
 description: Hand a whole multi-stage objective to the director — the orchestration agent that spawns the rest of the fleet and returns one verified result. Use for objectives with several delegation hops (investigate → decide → build → verify) that you don't need to steer step by step. Add --plan-only to get the plan and delegation map without changing anything.
 argument-hint: "[--plan-only] <objective>"
-allowed-tools: Task, Agent, Bash
+allowed-tools: Task(director), Agent(director), Bash(git rev-parse --show-toplevel)
 ---
 
 # delegate-kit — run

@@ -4,7 +4,8 @@
 Reads the hook JSON on stdin. Acts only when the input carries an `agent_id`
 (i.e. the call comes from a subagent); the user's own session is never touched.
 On a match it prints a permissionDecision=deny JSON and exits 0. Anything else
-(allowed command, parse error, crash) prints nothing and exits 0 = allow.
+(any other command, parse error, crash) prints nothing and exits 0: pass-through,
+no decision, so the normal permission flow applies. This hook never grants permission.
 
 Pure regex/lexing, stdlib only, no git subprocess. This is a guardrail against
 habitual commands, not a sandbox: `python -c "subprocess..."` bypasses it.
@@ -254,7 +255,7 @@ def describe(sub, rest):
 
 
 def check_command(cmd, depth=0):
-    """Return a deny-reason string for `cmd`, or None to allow."""
+    """Return a deny-reason string for `cmd`, or None (pass-through, no decision)."""
     if depth > MAX_DEPTH or not cmd:
         return None
     if depth == 0:
@@ -295,7 +296,7 @@ def evaluate(payload):
 
 # ---------------------------------------------------------------- selftest
 
-ALLOW = [
+PASS = [
     "git add a.py",
     "git add ./src/x.py",
     "git add src/a.py src/b.py",
@@ -435,12 +436,12 @@ PAYLOADS = [
 def selftest():
     bad = 0
     total = 0
-    for cmd in ALLOW:
+    for cmd in PASS:
         total += 1
         r = check_command(cmd)
         if r is not None:
             bad += 1
-            print("FAIL (expected allow): %r -> %s" % (cmd, r))
+            print("FAIL (expected pass-through): %r -> %s" % (cmd, r))
     for cmd in DENY:
         total += 1
         if check_command(cmd) is None:
@@ -451,7 +452,7 @@ def selftest():
         got = evaluate(payload) is not None
         if got != want:
             bad += 1
-            print("FAIL (payload, expected %s): %r" % ("deny" if want else "allow", payload))
+            print("FAIL (payload, expected %s): %r" % ("deny" if want else "pass-through", payload))
     print("git_guard selftest: %d cases, %d failed" % (total, bad))
     return 1 if bad else 0
 
@@ -466,7 +467,7 @@ def main():
         payload = json.loads(raw) if raw.strip() else None
         reason = evaluate(payload)
     except Exception:
-        return 0  # fail open
+        return 0  # on error: no decision (pass-through)
     if reason:
         sys.stdout.write(
             json.dumps(

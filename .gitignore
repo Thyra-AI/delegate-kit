@@ -9,3 +9,6 @@ __pycache__/
 
 # Cygwin/MSYS crash dumps
 *.stackdump
+
+# Claude Code / Serena local project state
+.serena/

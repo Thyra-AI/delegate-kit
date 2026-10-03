@@ -20,7 +20,7 @@ The classes above are the general shape. In Python, hunt for these specifically.
 
 **resource.** — an `httpx`/`aiohttp` client, file, or stream opened without `with`/`async with` and never closed; a client constructed per request instead of reused; an async generator not closed on client disconnect; a `NamedTemporaryFile` that outlives its use.
 
-**sec.** — SQL built with an f-string or passed through `text()` from user input; `subprocess` with `shell=True` on user input; `eval`/`exec`; `yaml.load` without `SafeLoader`; `pickle` on untrusted data; a request to a user-supplied URL (SSRF); `os.path.join` on user input (traversal); `allow_origins=["*"]` together with `allow_credentials=True`.
+**sec.** — SQL built with an f-string or passed through `text()` from user input; a shell command built from user input; user input reaching dynamic code evaluation; unsafe deserialization (`yaml.load` without `SafeLoader`, `pickle` on untrusted data); server-side SSRF through a user-supplied address; `os.path.join` on user input (traversal); `allow_origins=["*"]` together with `allow_credentials=True`.
 
 **state.** — a module-level dict, list, or cache mutated by request handlers; an unbounded `lru_cache` or hand-rolled cache on a per-user key; cross-worker state assumed consistent under gunicorn/uvicorn workers.
 

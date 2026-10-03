@@ -1,7 +1,7 @@
 ---
 name: setup
 description: Install or reconfigure the delegate-kit subagents, picking which optional integrations (Serena, graphify, or your own) they are wired for. Detects what is actually available in this environment, confirms the picks with you, then writes the composed agent definitions to ~/.claude/agents. Run this after installing the plugin, after adding or removing an MCP server, and after upgrading the plugin.
-allowed-tools: Bash, Read, AskUserQuestion
+allowed-tools: Bash(python --version), Bash(python3 --version), Bash(py -3 --version), Bash(python ${CLAUDE_PLUGIN_ROOT}/bin/compose.py:*), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/bin/compose.py:*), Bash(py -3 ${CLAUDE_PLUGIN_ROOT}/bin/compose.py:*), Bash(command -v:*), Read, AskUserQuestion
 ---
 
 # delegate-kit — setup
@@ -25,15 +25,15 @@ definition per agent.
 
 First pick the interpreter, once, and use it for every command below. Don't assume
 `python` is usable: on Windows it can be the Microsoft Store stub, and on older systems
-it can be Python 2. Verify it is 3.8 or newer:
+it can be Python 2. Probe it, and read the version it prints:
 
 ```
-python -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"
+python --version
 ```
 
-Exit 0 means use `python`. Anything else (not found, stub, Python 2, too old) means run
-the same check with `python3` and use that one if it passes. Below, `<py>` stands for
-whichever passed.
+A line reading `Python 3.8` or newer means use `python`. Anything else (not found, the
+Store stub's error, Python 2, too old) means run `python3 --version` and use that one if it
+prints 3.8 or newer. Below, `<py>` stands for whichever passed.
 
 ```
 <py> "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --list
@@ -43,7 +43,7 @@ This prints every fragment found, in both the plugin's `integrations/` and the u
 `~/.claude/delegate-kit/integrations/` (same name = the user's wins), each with a
 `detect_mcp` (an MCP server name), a `detect_bin` (an executable on PATH), or neither.
 
-If neither passes, try `py -3` (same check). If none work, stop and tell the user
+If neither passes, try `py -3 --version` (same check). If none work, stop and tell the user
 delegate-kit's setup needs Python 3.8+ on PATH — don't try to compose by hand.
 
 ## 2. Detect what's actually here

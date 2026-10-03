@@ -455,6 +455,46 @@ than silently dropping your whole grant.
   catches it before you install.
 - **Add your own agents** alongside these and reference them from your own copy of the skill.
 
+## What this plugin runs and changes
+
+Nothing here is hidden. This is everything delegate-kit executes or writes on your machine.
+
+**A `PreToolUse` hook (`hooks/git_guard.py`).** It runs before every `Bash` tool call, and acts
+only when the call comes from a **subagent** — your own session's commands are never touched. It
+denies destructive git: `stash`, `restore`, `clean`, `rebase`, `checkout`, `switch`,
+`filter-branch`/`filter-repo`, `reset --hard`/`--merge`, `commit --amend`, forced branch delete or
+move, `add -A`/`-u`/`.` (explicit paths only), and force, delete or mirror pushes. It only ever
+**denies**; it never auto-approves anything. A command it does not recognise passes through with no
+decision, so Claude Code's normal permission prompts and your own allow/deny rules apply exactly as
+before. It is regex lexing in stdlib Python — a guardrail against habitual commands, not a sandbox.
+Its tests: `python hooks/git_guard.py --selftest`.
+
+**`/delegate-kit:setup`** runs `bin/compose.py`, which writes the composed agent definitions to
+`~/.claude/agents/` (backing up anything it overwrites to `~/.claude/agents/.delegate-kit-backup`)
+and copies `partition.py`, `bench.py`, `squash.py` and a `dk` launcher to
+`~/.claude/delegate-kit/bin/`. Both move under `$CLAUDE_CONFIG_DIR` if you set it.
+
+**`/delegate-kit:director on|off`** edits one key, `agent`, in the project's
+`.claude/settings.local.json` (merged, never overwritten; refuses to touch a file it cannot parse
+or an `agent` value it did not write). Run with no argument it only reports state.
+
+**Run ledgers.** A director run writes its artifacts — plans, reports, partition maps — under
+`.delegate-kit/` in the project root. Add `.delegate-kit/` to `.gitignore` (the commands offer to
+do it for you).
+
+**The `bin/` scripts** are plain Python, stdlib only. `partition.py` reads your repo (and runs
+read-only `git` queries) to propose work splits; `bench.py` reads your own session transcripts to
+report per-agent cost; `squash.py` folds `[Wn]`-tagged commits into one per tag by running
+`git rebase` on your **local, unpushed** history, and refuses when the tree is dirty.
+
+**Network.** The plugin's own code makes no network calls and sends no telemetry. The one place
+the web enters is the `researcher` subagent, which has `WebSearch` and `WebFetch` and uses them
+when you give it an external-research task.
+
+**Cost.** Subagents run in your own Claude Code session and spend your own Claude usage; see
+[What it saves — measured](#what-it-saves--measured) for what that looks like. Privacy details:
+[PRIVACY.md](PRIVACY.md). Help: [SUPPORT.md](SUPPORT.md).
+
 ## How it's structured
 
 ```
@@ -462,6 +502,10 @@ delegate-kit/
 ├── .claude-plugin/
 │   ├── marketplace.json     # marketplace registry (one plugin, source ./)
 │   └── plugin.json          # plugin manifest
+├── assets/
+│   └── icon.svg             # plugin icon
+├── PRIVACY.md               # what it writes, and that it collects nothing
+├── SUPPORT.md               # where to ask for help
 ├── templates/agents/        # base definitions — built-in tools only
 │   ├── director.md
 │   ├── thinker.md

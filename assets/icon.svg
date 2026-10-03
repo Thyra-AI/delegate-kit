@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="delegate-kit">
+  <rect width="128" height="128" rx="24" fill="#1f2937"/>
+  <g stroke="#93c5fd" stroke-width="5" stroke-linecap="round" fill="none">
+    <path d="M64 40 L32 88"/>
+    <path d="M64 40 L64 88"/>
+    <path d="M64 40 L96 88"/>
+  </g>
+  <circle cx="64" cy="36" r="13" fill="#f59e0b"/>
+  <circle cx="32" cy="92" r="9" fill="#60a5fa"/>
+  <circle cx="64" cy="92" r="9" fill="#60a5fa"/>
+  <circle cx="96" cy="92" r="9" fill="#60a5fa"/>
+</svg>

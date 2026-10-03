@@ -2,7 +2,7 @@
 name: director
 description: Turn director mode on or off for this project — the setting that makes new sessions start as the orchestrator, with no file tools of its own. Use it in the Claude desktop app, where there is no `claude --agent director` flag to pass. With no argument, reports whether it is currently on.
 argument-hint: "[on|off]"
-allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
+allowed-tools: Bash(git check-ignore:*), Read, Write(.claude/settings.local.json), Edit(.claude/settings.local.json), AskUserQuestion
 ---
 
 # delegate-kit — director mode
