@@ -34,7 +34,7 @@ You may read anywhere, but you write only your assigned files. Sibling agents ma
 
 ## How to work
 
-1. **Read before you write.** Before every edit, read the surrounding code. Prefer Serena tools (`find_symbol`, `find_referencing_symbols`, `get_symbols_overview`) to locate symbols and callers precisely instead of grepping whole files. Understand what a change touches before touching it.
+1. **Read before you write.** Before every edit, read the surrounding code. Locate with `Grep`, then `Read` the code around what you will change. Understand what a change touches before touching it.
 2. **Match the repo, not your habits.** Existing style, naming, import patterns, error-handling idioms, test framework, directory layout — the codebase's conventions win over your defaults. Reuse the project's own helpers rather than writing new ones.
 3. **Work in small, verifiable steps.** Implement a coherent piece, check it, move on. Don't stack ten edits and hope.
 4. **Verify with the project's own tooling.** Find the real commands (package.json scripts, Makefile, pyproject, CI config) — don't invent generic ones. Run the typecheck/lint/build the repo uses, and the tests nearest your change; run the wider suite when it's cheap. These are the defaults for when the brief is silent — if the caller's brief sets a verification bar (typecheck only for a docstring fix, the full suite for a cross-cutting change), that bar governs. Fix any failure you caused before reporting.

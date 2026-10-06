@@ -17,12 +17,12 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 | **thinker** | opus 5.5 (medium effort) | no file access | Deep reasoning over context you already have: analysis, trade-offs, planning, debugging-by-reasoning, hard decisions. |
 | **super-thinker** | fable | no file access | Same as thinker, but the top tier — reach for it when the reasoning is hardest or the call is highest-stakes and you want maximum depth. |
 | **researcher** | sonnet 5.5 (high effort) | Read/Grep/Glob/Bash **+ WebSearch/WebFetch** (+ Serena & graphify when installed) | Understanding how something works — the full flow through the system and the nodes involved — **and** research whose answer lives outside the repo: external docs, APIs, specs, changelogs, the web. |
-| **executer** | sonnet 5.5 (high effort) | Full: Edit/Write, Bash, Read/Grep/Glob (+ Serena when installed) | Implementing a settled plan end-to-end: write/edit code, run the project's build & tests, fix what it broke, report verified results. |
+| **executer** | sonnet 5.5 (high effort) | Full: Edit/Write, Bash, Read/Grep/Glob | Implementing a settled plan end-to-end: write/edit code, run the project's build & tests, fix what it broke, report verified results. |
 | **simple-tasks** | haiku | Read/Grep/Glob/Bash (+ Serena when installed) | Mechanical chores (commits, pushes, commands, builds, file ops) **and** multi-hop low-judgment work — chains of dependent steps that would otherwise burn the expensive main context. |
 | **bug-hunter** | haiku | Read/Grep/Write (Write = its findings shard only) | Hunting real defects in an explicit list of files or a diff. Never edits code, never comments on style. Cheap and disposable — built to be fanned out many at a time over a batched codebase. |
 | **partitioner** | sonnet 5.5 (medium effort) | Read/Grep/Glob/Bash/Write (Write = ledger/scratch only) (+ Serena & graphify when installed) | Turning a list of work units into a `schedule.json` of layers and clusters — which agent owns which files, what runs in parallel, what must go first. Returns a ≤25-line summary. Never edits source. |
 
-> **Two modes for researcher, executer & simple-tasks.** They work with **zero setup** using built-in `Read`/`Grep`/`Glob`/`Bash` (Standard mode). If the project has [Serena](https://github.com/oraios/serena) (symbol-precise navigation) and/or graphify (flow/structure graphs), they automatically prefer those for cheaper, more precise navigation (Power mode). Nothing to configure either way.
+> **Two modes for researcher & simple-tasks.** They work with **zero setup** using built-in `Read`/`Grep`/`Glob`/`Bash` (Standard mode). If the project has [Serena](https://github.com/oraios/serena) (symbol-precise navigation) and/or graphify (flow/structure graphs), they automatically prefer those for cheaper, more precise navigation (Power mode). Nothing to configure either way.
 
 ---
 

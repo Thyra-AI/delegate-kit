@@ -368,7 +368,7 @@ setup on its own.
 use them. Three ship with the plugin:
 
 - **[Serena](https://github.com/oraios/serena)** — MCP server for symbol-level navigation (read one
-  symbol, not a whole file). Applies to `executer`, `researcher`, `simple-tasks`.
+  symbol, not a whole file). Applies to `researcher`, `simple-tasks`, `partitioner`.
 - **graphify** — flow/structure knowledge graphs (`graphify query/path/explain`). Applies to
   `researcher`; adds prose only, since it runs through Bash.
 - **python** — the Python defect taxonomy (asyncio, FastAPI, SQLAlchemy, plus Python-only traps)
