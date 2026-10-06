@@ -292,10 +292,8 @@ def kfmt(n):
     return "%d" % n
 
 
-def cluster_rows(agents, plan):
-    """Group non-main agents by leading [Wn] tag onto the plan's clusters (a tag matches a cluster's
-    wus or commit_tag). Clusters nobody ran get agents=0; tags the plan does not know, and agents
-    without a tag, get their own trailing rows."""
+def plan_tags(plan):
+    """{tag: cluster id} for every tag an agent description may lead with (a cluster's wus or commit_tag)."""
     tag_cluster = {}
     for c in plan.get("clusters") or []:
         for w in c.get("wus") or []:
@@ -303,6 +301,45 @@ def cluster_rows(agents, plan):
         t = (c.get("commit_tag") or "").strip("[]")
         if t:
             tag_cluster[t] = c["id"]
+    return tag_cluster
+
+
+def join_warnings(crows, agents, plan):
+    """Warnings for a --plan join that silently shows nothing: no agent joined any tagged cluster, or
+    only some did. Returns a list of strings (empty when every tagged cluster has an agent)."""
+    tag_cluster = plan_tags(plan)
+    if not tag_cluster:
+        return []
+    subs = [r for r in agents if r["type"] != "main"]
+    joined = sum(r["agents"] for r in crows if r["cluster"] != "-")
+    if joined == 0:
+        seen = []
+        for r in subs:
+            d = " ".join((r["description"] or "").split()) or "(no description)"
+            d = d if len(d) <= 60 else d[:57] + "..."
+            if d not in seen:
+                seen.append(d)
+        msg = ("WARNING: 0 of %d agents matched a [Wn] tag in the plan — start every spawned agent's "
+               "description with its cluster tag (e.g. \"[W3] squash + guard\"), or bench cannot compare "
+               "estimates to actuals." % len(subs))
+        msg += "\n  plan tags: " +", ".join("[%s]" % t for t in sorted(tag_cluster))
+        if seen:
+            msg += "\n  descriptions seen: " +"; ".join('"%s"' % d for d in seen[:4])
+            if len(seen) > 4:
+                msg += " (+%d more)" % (len(seen) - 4)
+        return [msg]
+    missing = [r["cluster"] for r in crows if r["cluster"] != "-" and r["agents"] == 0]
+    if missing:
+        return ["note: no agent joined cluster(s) %s of the plan (%d of %d clusters ran)." % (
+            ", ".join(missing), len(plan.get("clusters") or []) - len(missing), len(plan.get("clusters") or []))]
+    return []
+
+
+def cluster_rows(agents, plan):
+    """Group non-main agents by leading [Wn] tag onto the plan's clusters (a tag matches a cluster's
+    wus or commit_tag). Clusters nobody ran get agents=0; tags the plan does not know, and agents
+    without a tag, get their own trailing rows."""
+    tag_cluster = plan_tags(plan)
     groups = collections.OrderedDict((c["id"], []) for c in plan.get("clusters") or [])
     extra = collections.OrderedDict()
     for r in agents:
@@ -350,6 +387,13 @@ def emit(line):
         print(line)
     except UnicodeEncodeError:
         print(line.encode("ascii", "replace").decode("ascii"))
+
+
+def emit_err(line):
+    try:
+        print(line, file=sys.stderr)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", "replace").decode("ascii"), file=sys.stderr)
 
 
 def print_clusters(rows):
@@ -405,6 +449,28 @@ def selftest():
         if got != want_chars:
             failed += 1
             print("FAIL %s: chars %r, want %r" % (name, got, want_chars))
+    # --plan join warnings
+    def ag(desc, typ="executer"):
+        return {"type": typ, "description": desc, "cost": None, "peak_context": 0, "tool_calls": 0,
+                "cumulative_input": 0, "output": 0}
+    plan = {"clusters": [{"id": "C1", "wus": ["W1"], "commit_tag": "[W1]"},
+                         {"id": "C2", "wus": ["W2"], "commit_tag": "[W2]"}]}
+
+    def warn(agents, pl=plan):
+        return join_warnings(cluster_rows(agents, pl), agents, pl)
+    z = warn([ag("main", "main"), ag("fix the thing"), ag("[W9] unknown tag")])
+    p = warn([ag("[W1] did it"), ag("stray")])
+    jc = [("zero join warns", len(z) == 1 and z[0].startswith("WARNING: 0 of 2 agents matched a [Wn] tag")
+           and "[W1]" in z[0] and "fix the thing" in z[0]),
+          ("partial join notes missing cluster", len(p) == 1 and p[0].startswith("note:") and "C2" in p[0]
+           and "C1" not in p[0]),
+          ("full join is quiet", warn([ag("[W1] a"), ag("[W2] b")]) == []),
+          ("plan with no tagged cluster is quiet", warn([ag("x")], {"clusters": [{"id": "C1"}]}) == [])]
+    for name, ok in jc:
+        cases.append(name)
+        if not ok:
+            failed += 1
+            print("FAIL %s" % name)
     print("bench selftest: %d cases, %d failed" % (len(cases), failed))
     return 1 if failed else 0
 
@@ -452,6 +518,7 @@ def main():
     tot["unpriced_agents"] = sum(1 for r in rows if r["cost"] is None or r["unpriced_requests"])
 
     crows = None
+    warnings = []
     if args.plan:
         try:
             with open(args.plan, encoding="utf-8") as fh:
@@ -461,6 +528,9 @@ def main():
         except (OSError, ValueError) as e:
             sys.exit("bench: cannot read --plan %s: %s" % (args.plan, e))
         crows = cluster_rows(rows, plan)
+        warnings = join_warnings(crows, rows, plan)
+        for w in warnings:
+            emit_err(w)
 
     if args.json:
         out = {"prices_per_mtok": {k: list(v) for k, v in prices.items()},
@@ -469,9 +539,14 @@ def main():
         if crows is not None:
             out["plan"] = args.plan
             out["clusters"] = crows
+            out["warnings"] = warnings
         print(json.dumps(out, indent=2))
         return
 
+    for w in warnings:
+        emit(w)
+    if warnings:
+        print()
     print("bench: %s" % args.path)
     print("prices $/MTok in/out/cache-write/cache-read (DEFAULTS UNVERIFIED, override with --price): "
           + "; ".join("%s=%s" % (k, "/".join("%g" % x for x in v)) for k, v in prices.items()))
