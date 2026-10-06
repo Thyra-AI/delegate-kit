@@ -78,24 +78,31 @@ TEST_RE = re.compile(
 TEST_DIRS = {"tests", "test", "__tests__", "spec", "specs", "e2e"}
 GENERIC_STEMS = {"__init__", "index", "mod", "main", "lib"}
 
-# Sizing model, calibrated from bin/bench.py runs over 8 executers (peak = max per-request
-# input context): peak ~= 30k base + ~2k per tool call. Refit with `calibrate`.
+# Sizing model, fitted to bin/bench.py measurements of real executers (peak = max per-request
+# input context). Refit overhead/hop_tokens with `calibrate`. The defaults are not the best fit
+# to the 8 short build agents measured (45000/700 fits them slightly better); hop_tokens is kept
+# near the per-call growth of long agents (1.3-2.6k/call) so long clusters still read OVERSIZE.
 #   est_hops   = hops_base (skipped for research-only clusters) + sum over WUs/files by kind:
 #                  build  : per planned new file hops_new_small / hops_new / hops_new_large by the
 #                           WU's optional "size" (small|medium|large, default medium);
-#                           hops_edit per existing file (hops_doc_per_file for docs)
+#                           existing code files: the first costs the size hops when the WU creates
+#                           no new file (hops_edit when it does), each further one hops_edit;
+#                           docs files (markdown etc.) hops_doc_per_file
 #                  apply/wire : hops_per_file (hops_doc_per_file for docs) per file + hits / hits_per_hop
+#                  build/apply/wire : + hops_doc_base once per WU that touches any existing docs file
 #                  fix    : hops_fix_per_file per file + hits / hits_per_hop, + hops_fix_verify per WU
 #                  verify : hops_verify per verify WU (its files are not read)
 #                  research : hops_research_per_file per file, + hops_research_base per WU
-#   est_tokens = overhead + est_hops * hop_tokens
-#   est_output = build kinds only: planned new files x size_{small,medium,large}_tokens x output_factor
-#   est_cum_input = est_hops * (overhead + est_tokens) / 2; est_cost prices it as 90% cache
-#   reads + 10% cache writes, plus est_output at the output price (price_* are $/MTok).
+#   est_output = every build WU writes size_{small,medium,large}_tokens x output_factor: once per
+#                planned new file, or once for the WU when it creates none (existing files only)
+#   est_tokens = overhead + est_hops * hop_tokens + output_in_peak * est_output  (written content
+#                and heredocs stay in context, so they count toward the peak)
+#   est_cum_input = est_hops * (overhead + est_tokens) / 2; est_cost prices it as 95% cache
+#   reads + 5% cache writes, plus est_output at the output price (price_* are $/MTok).
 DEFAULTS = {
-    "budget": 100000, "overhead": 30000, "hop_tokens": 2000, "hops_base": 6,
+    "budget": 100000, "overhead": 30000, "hop_tokens": 1500, "hops_base": 6, "output_in_peak": 0.5,
     "hops_new_small": 8, "hops_new": 20, "hops_new_large": 30, "hops_edit": 3, "hops_per_file": 3, "hits_per_hop": 4,
-    "hops_verify": 15, "hops_doc_per_file": 5,
+    "hops_verify": 15, "hops_doc_per_file": 2, "hops_doc_base": 6,
     "hops_fix_per_file": 5, "hops_fix_verify": 6,
     "hops_research_per_file": 2, "hops_research_base": 8,
     "size_small_tokens": 3000, "size_medium_tokens": 12000, "size_large_tokens": 40000, "output_factor": 1.5,
@@ -106,8 +113,8 @@ KINDS = ("build", "apply", "wire", "verify", "fix", "research")
 # `calibrate` only refits these two, and clamps them to these bounds.
 CALIB_KEYS = ("overhead", "hop_tokens")
 CALIB_BOUNDS = {"overhead": (10000, 80000), "hop_tokens": (500, 6000)}
-CALIB_MIN_ROWS = 4
-CACHE_WRITE_SHARE = 0.1
+CALIB_MIN_ROWS = 10
+CACHE_WRITE_SHARE = 0.05
 
 # ---------------------------------------------------------------- utilities
 
@@ -728,6 +735,25 @@ def hits_per_hop_of(params):
     return v if v > 0 else float(DEFAULTS["hits_per_hop"])  # NaN and <= 0 fall through
 
 
+def output_tokens(files, params, kinds, sizes, wu_ids=()):
+    """est_output (tokens a cluster writes): per build WU, size tokens x output_factor once per
+    planned new file, or once for the WU when it creates no new file."""
+    per_file = collections.defaultdict(float)  # planned file index -> best size tokens
+    has_new = set()
+    for i, f in enumerate(files):
+        if not f.get("planned"):
+            continue
+        for w in f.get("wus") or []:
+            if kinds.get(w) == "build":
+                has_new.add(w)
+                per_file[i] = max(per_file[i], params[SIZE_TOKENS.get(sizes.get(w), "size_medium_tokens")])
+    out_tok = sum(per_file.values())
+    for w in (wu_ids or kinds):
+        if kinds.get(w) == "build" and w not in has_new:
+            out_tok += params[SIZE_TOKENS.get(sizes.get(w), "size_medium_tokens")]
+    return out_tok * params["output_factor"]
+
+
 def estimate(files, params, wu_ids=(), kinds=None, sizes=None):
     """Sizing numbers only, from WU kinds (see DEFAULTS). `files` entries carry "wus", "hits",
     "planned", "lang"; `kinds` maps WU id -> kind (unknown or missing ids count as apply); `sizes`
@@ -746,7 +772,16 @@ def estimate(files, params, wu_ids=(), kinds=None, sizes=None):
             hops += params["hops_fix_verify"]
         elif k == "research":
             hops += params["hops_research_base"]
-    for f in files:
+    new_wus, doc_wus, first_code = set(), set(), {}
+    for i, f in enumerate(files):
+        for w in f.get("wus") or []:
+            if f.get("planned"):
+                new_wus.add(w)
+            elif f.get("lang") == "docs":
+                doc_wus.add(w)
+            else:
+                first_code.setdefault(w, i)
+    for i, f in enumerate(files):
         best = 0.0
         doc = f.get("lang") == "docs"
         for w in f.get("wus") or [None]:
@@ -758,31 +793,28 @@ def estimate(files, params, wu_ids=(), kinds=None, sizes=None):
             elif k == "build":
                 if f.get("planned"):
                     h = params[SIZE_HOPS.get(sizes.get(w), "hops_new")]
+                elif doc:
+                    h = params["hops_doc_per_file"]
+                elif first_code.get(w) == i and w not in new_wus:
+                    h = params[SIZE_HOPS.get(sizes.get(w), "hops_new")]
                 else:
-                    h = params["hops_doc_per_file"] if doc else params["hops_edit"]
+                    h = params["hops_edit"]
             elif k == "fix":
                 h = params["hops_fix_per_file"] + f.get("hits", 0) / hph
             else:
                 h = (params["hops_doc_per_file"] if doc else params["hops_per_file"]) + f.get("hits", 0) / hph
             best = max(best, h)
         hops += best
-    return int(params["overhead"] + hops * params["hop_tokens"]), int(round(hops))
+    for w in doc_wus:
+        if kinds.get(w, "apply") not in ("verify", "fix", "research"):
+            hops += params["hops_doc_base"]
+    out = output_tokens(files, params, kinds, sizes, wu_ids)
+    return int(params["overhead"] + hops * params["hop_tokens"] + params["output_in_peak"] * out), int(round(hops))
 
 
-def cost_model(files, params, est, hops, kinds=None, sizes=None):
+def cost_model(files, params, est, hops, kinds=None, sizes=None, wu_ids=()):
     """est_output / est_cum_input / est_cost for a cluster whose estimate() gave (est, hops)."""
-    kinds = kinds or {}
-    sizes = sizes or {}
-    out_tok = 0.0
-    for f in files:
-        if not f.get("planned"):
-            continue
-        best = 0.0
-        for w in f.get("wus") or []:
-            if kinds.get(w) == "build":
-                best = max(best, params[SIZE_TOKENS.get(sizes.get(w), "size_medium_tokens")])
-        out_tok += best
-    out_tok = int(out_tok * params["output_factor"])
+    out_tok = int(output_tokens(files, params, kinds or {}, sizes or {}, wu_ids))
     cum = int(hops * (params["overhead"] + est) / 2.0)
     cost = (cum * (CACHE_WRITE_SHARE * params["price_cw"] + (1 - CACHE_WRITE_SHARE) * params["price_cr"])
             + out_tok * params["price_out"]) / 1e6
@@ -972,7 +1004,7 @@ def build_plan(m, p):
             "verify": all(byid[w]["kind"] == "verify" for w in g),
             "research": not taggable,
         }
-        cl.update(cost_model(ents, params, est, hops, gk, gs))
+        cl.update(cost_model(ents, params, est, hops, gk, gs, g))
         clusters.append(cl)
     for c in clusters:
         c["siblings"] = [o for o in layers[c["layer"]] if o != c["id"]]
@@ -1011,7 +1043,7 @@ def build_plan(m, p):
     ak = {w: byid[w]["kind"] for w in ids}
     asz = {w: byid[w].get("size") for w in ids}
     sest, shops = estimate(alle, params, ids, ak, asz)
-    scost = cost_model(alle, params, sest, shops, ak, asz)
+    scost = cost_model(alle, params, sest, shops, ak, asz, ids)
     plan = {
         "version": VERSION, "base_sha": m.get("head", ""), "budget": params["budget"], "params": params,
         "layers": layers, "clusters": clusters, "overlap": overlap, "overlap_counts": counts,
@@ -1076,7 +1108,7 @@ def normalize(plan):
         if c["research"]:
             kinds = {w: "research" for w in c["wus"]}
         c["est_tokens"], c["est_hops"] = estimate(c["files"], params, c["wus"], kinds, sizes)
-        c.update(cost_model(c["files"], params, c["est_tokens"], c["est_hops"], kinds, sizes))
+        c.update(cost_model(c["files"], params, c["est_tokens"], c["est_hops"], kinds, sizes, c["wus"]))
     return plan
 
 
@@ -1262,13 +1294,22 @@ def check_after(plan, base, root):
 # ---------------------------------------------------------------- output
 
 
+def params_source_text(src):
+    """Where the sizing constants came from: calibration.json (n=12, 2026-10-06) / defaults, +flags."""
+    src = src or {}
+    if src.get("calibration"):
+        meta = [x for x in ("n=%s" % src["n"] if src.get("n") is not None else "", src.get("date") or "") if x]
+        base = "calibration.json" + (" (%s)" % ", ".join(meta) if meta else "")
+    else:
+        base = "defaults"
+    return base + ("+flags" if src.get("flags") else "")
+
+
 def render(plan, warnings):
     lines = []
     wn = len(plan.get("wus") or {})
     s = plan.get("single_agent_est") or {}
-    src = (plan.get("params") or {}).get("source") or {}
-    srcs = ("calibration.json" if src.get("calibration") else "defaults") + (
-        "+flags" if src.get("flags") else "")
+    srcs = params_source_text((plan.get("params") or {}).get("source"))
     lines.append("base %s budget %s | %d WUs -> %d clusters in %d layers | single-agent ~%s tok / %s hops%s | params: %s" % (
         (plan.get("base_sha") or "none")[:8], fmt_k(plan["budget"]), wn, len(plan["clusters"]),
         len(plan["layers"]), fmt_k(s.get("tokens", 0)), s.get("hops", "?"),
@@ -1350,7 +1391,7 @@ def pos_float(s):
 
 PLAN_FLAGS = [
     ("budget", int, "per-agent token budget (sizing input)"),
-    ("overhead", int, "base context per agent in tokens; est_tokens = overhead + est_hops * hop_tokens"),
+    ("overhead", int, "base context per agent in tokens; est_tokens = overhead + est_hops * hop_tokens + output_in_peak * est_output"),
     ("hop_tokens", int, "context growth per tool call"),
     ("hops_base", float, "fixed tool calls per cluster (not for research-only clusters)"),
     ("hops_new_small", float, "build WU with \"size\": \"small\": tool calls per planned new file"),
@@ -1361,6 +1402,7 @@ PLAN_FLAGS = [
     ("hits_per_hop", pos_float, "apply/wire/fix WU: seed hits handled per extra tool call"),
     ("hops_verify", float, "verify WU: tool calls per verify WU"),
     ("hops_doc_per_file", float, "docs files (markdown etc.) in apply/wire/build-edit: tool calls per file instead of hops_per_file/hops_edit"),
+    ("hops_doc_base", float, "build/apply/wire WU touching any docs file: one-time extra tool calls per WU"),
     ("hops_fix_per_file", float, "fix WU (apply review findings): tool calls per file, plus hits/--hits-per-hop"),
     ("hops_fix_verify", float, "fix WU: verify allowance in tool calls per WU"),
     ("hops_research_per_file", float, "research WU (read-only): tool calls per file"),
@@ -1368,7 +1410,8 @@ PLAN_FLAGS = [
     ("size_small_tokens", int, "build: estimated tokens of a small new file (est_output)"),
     ("size_medium_tokens", int, "build: estimated tokens of a medium new file"),
     ("size_large_tokens", int, "build: estimated tokens of a large new file"),
-    ("output_factor", float, "est_output = new-file tokens x this"),
+    ("output_factor", float, "est_output = size tokens x this, per new file (once per build WU creating none)"),
+    ("output_in_peak", float, "share of est_output that stays in context and counts toward est_tokens"),
     ("fanout", int, "importer count that triggers HIGH_FANOUT"),
     ("low_util", float, "LOW_UTIL below this fraction of budget"),
     ("single_max_files", int, "SINGLE_AGENT_OK up to this many files"),
@@ -1402,25 +1445,29 @@ def clamp_calib(k, v):
 
 
 def load_calibration(path):
-    """{key: value} of the refit constants from a calibration.json, or {} if absent/unusable."""
+    """({key: value} of the refit constants, {"n", "date"} provenance) from a calibration.json, or
+    ({}, {}) if absent/unusable."""
     if not os.path.isfile(path):
-        return {}
+        return {}, {}
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
-        return {k: clamp_calib(k, float(d[k])) for k in CALIB_KEYS if k in d}
+        vals = {k: clamp_calib(k, float(d[k])) for k in CALIB_KEYS if k in d}
+        n = d.get("n_rows", d.get("rows"))
+        date = str(d.get("date") or d.get("fitted_at") or "")[:10]
+        return vals, {"n": n if isinstance(n, int) else None, "date": date}
     except (OSError, ValueError, TypeError, AttributeError):
         sys.stderr.write("partition: ignoring unreadable calibration file %s\n" % path)
-        return {}
+        return {}, {}
 
 
 def plan_params(a):
     """DEFAULTS < calibration.json < explicit flags. params["source"] records which won."""
     cpath = None
-    calib = {}
+    calib, meta = {}, {}
     if not getattr(a, "no_calibration", False):
         cpath = getattr(a, "calibration", None) or calibration_path()
-        calib = load_calibration(cpath)
+        calib, meta = load_calibration(cpath)
         if getattr(a, "calibration", None) and not calib:
             die("calibration file %s missing or unusable" % cpath)
     out, flags, calibrated = {}, [], []
@@ -1444,6 +1491,8 @@ def plan_params(a):
         out.update(zip(("price_in", "price_out", "price_cw", "price_cr"), nums))
         flags += ["price_in", "price_out", "price_cw", "price_cr"]
     out["source"] = {"calibration": cpath if calibrated else None, "calibrated": calibrated, "flags": sorted(flags)}
+    if calibrated:
+        out["source"].update(meta)
     return out
 
 
@@ -1453,6 +1502,17 @@ def plan_params(a):
 def tag_of(desc):
     m = re.match(r"^\s*\[([^\]\s]+)\]", desc or "")
     return m.group(1) if m else None
+
+
+def session_of(ag):
+    """Session id an agent row came from: its "session" field, else read from its transcript path
+    (.../<sessionId>/subagents/agent-x.jsonl or .../<sessionId>.jsonl)."""
+    if ag.get("session"):
+        return str(ag["session"])
+    parts = posix(str(ag.get("file") or "")).split("/")
+    if len(parts) >= 3 and parts[-2] == "subagents":
+        return parts[-3]
+    return re.sub(r"\.jsonl$", "", parts[-1]) if parts[-1] else ""
 
 
 def join_rows(bench, plan):
@@ -1475,26 +1535,29 @@ def join_rows(bench, plan):
             continue
         if c["id"] not in best or peak > best[c["id"]][1]["peak_context"]:
             best[c["id"]] = (c, ag)
+    share = ((plan.get("params") or {}).get("output_in_peak"))
+    share = DEFAULTS["output_in_peak"] if share is None else share
     return [{"cluster": c["id"], "tag": tag_of(ag["description"]), "peak": ag["peak_context"],
-             "tool_calls": ag["tool_calls"], "est_peak": c.get("est_tokens"), "est_hops": c.get("est_hops")}
+             "tool_calls": ag["tool_calls"], "est_peak": c.get("est_tokens"), "est_hops": c.get("est_hops"),
+             "out_peak": share * (c.get("est_output") or 0), "session": session_of(ag)}
             for c, ag in best.values()]
 
 
 def fit_line(rows):
-    """Least squares peak = a + b * tool_calls -> (a, b, mean calls, mean peak), or None without
-    any spread in tool calls."""
+    """Least squares (peak - out_peak) = a + b * tool_calls -> (a, b, mean calls, mean net peak), or
+    None without any spread in tool calls. out_peak is the plan's est_output share of the peak."""
     n = float(len(rows))
     mx = sum(r["tool_calls"] for r in rows) / n
-    my = sum(r["peak"] for r in rows) / n
+    my = sum(r["peak"] - r.get("out_peak", 0) for r in rows) / n
     sxx = sum((r["tool_calls"] - mx) ** 2 for r in rows)
     if sxx <= 0:
         return None
-    b = sum((r["tool_calls"] - mx) * (r["peak"] - my) for r in rows) / sxx
+    b = sum((r["tool_calls"] - mx) * (r["peak"] - r.get("out_peak", 0) - my) for r in rows) / sxx
     return my - b * mx, b, mx, my
 
 
 def fit_error(rows, overhead, hop_tokens):
-    errs = [overhead + hop_tokens * r["tool_calls"] - r["peak"] for r in rows]
+    errs = [overhead + hop_tokens * r["tool_calls"] + r.get("out_peak", 0) - r["peak"] for r in rows]
     rmse = (sum(e * e for e in errs) / len(errs)) ** 0.5
     mape = sum(abs(e) / r["peak"] for e, r in zip(errs, rows)) / len(rows)
     return rmse, mape
@@ -1510,7 +1573,7 @@ def cmd_calibrate(a):
         rows += join_rows(b, plans[0] if len(plans) == 1 else plans[i])
     out = a.out or calibration_path()
     prev = dict((k, DEFAULTS[k]) for k in CALIB_KEYS)
-    prev.update(load_calibration(out))
+    prev.update(load_calibration(out)[0])
     print("calibrate: %d joined row(s) from %d bench file(s)" % (len(rows), len(benches)))
     fit = fit_line(rows) if len(rows) >= CALIB_MIN_ROWS else None
     if fit is None:
@@ -1524,7 +1587,7 @@ def cmd_calibrate(a):
     new = {"overhead": ovh, "hop_tokens": hop}
     clamped = [k for k, raw in (("overhead", raw_ovh), ("hop_tokens", b0)) if new[k] != int(round(raw))]
     for r in rows:
-        r["fit_peak"] = ovh + hop * r["tool_calls"]
+        r["fit_peak"] = ovh + hop * r["tool_calls"] + r["out_peak"]
     e_old = fit_error(rows, prev["overhead"], prev["hop_tokens"])
     e_new = fit_error(rows, ovh, hop)
     print("%-10s %-9s %-9s %-9s %s" % ("cluster", "est_peak", "actual", "fit_peak", "calls est/act"))
@@ -1536,10 +1599,13 @@ def cmd_calibrate(a):
         print("%-10s %6d -> %-6d%s" % (k, prev[k], new[k], "  (clamped to %s..%s)" % CALIB_BOUNDS[k] if k in clamped else ""))
     print("fit error vs actual peak: rmse %s -> %s tok, mean abs %d%% -> %d%%" % (
         fmt_k(e_old[0]), fmt_k(e_new[0]), round(100 * e_old[1]), round(100 * e_new[1])))
-    write_json(out, {"version": VERSION, "fitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "rows": len(rows),
-                     "overhead": ovh, "hop_tokens": hop, "previous": prev,
-                     "fit": {"rmse": round(e_new[0]), "mean_abs_pct": round(100 * e_new[1], 1), "clamped": clamped},
-                     "data": [{k: r[k] for k in ("cluster", "tag", "peak", "tool_calls", "est_peak", "est_hops")} for r in rows]})
+    write_json(out, {"version": VERSION, "date": time.strftime("%Y-%m-%d"),
+                     "fitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "n_rows": len(rows),
+                     "rmse": round(e_new[0]), "mean_abs_pct": round(100 * e_new[1], 1),
+                     "sessions": sorted(set(r["session"] for r in rows if r["session"])),
+                     "overhead": ovh, "hop_tokens": hop, "previous": prev, "clamped": clamped,
+                     "data": [{k: r[k] for k in ("cluster", "tag", "session", "peak", "tool_calls", "est_peak", "est_hops")}
+                              for r in rows]})
     print("-> %s" % posix(out))
 
 
@@ -1648,19 +1714,39 @@ def selftest():
                 r = ("exit", e.code)
         return r, buf.getvalue()
 
-    P = dict(DEFAULTS)
+    # overhead/hop_tokens pinned: they are the fitted defaults and move with every refit
+    P = dict(DEFAULTS, overhead=30000, hop_tokens=2000)
     code = {"path": "a.py", "wus": ["W1"], "hits": 8, "lang": "python"}
+    code2 = {"path": "b.py", "wus": ["W1"], "hits": 0, "lang": "python"}
     doc = {"path": "a.md", "wus": ["W1"], "hits": 8, "lang": "docs"}
+    doc0 = {"path": "a.md", "wus": ["W1"], "hits": 0, "lang": "docs"}
+    doc0b = {"path": "b.md", "wus": ["W1"], "hits": 0, "lang": "docs"}
     new = {"path": "n.py", "wus": ["W1"], "hits": 0, "planned": True}
+    bld = {"W1": "build"}
 
-    # estimate(): (tokens, hops). hops = hops_base + per-file by kind; tokens = overhead + hops * hop_tokens
+    # estimate(): (tokens, hops). hops = hops_base + per-file by kind (+ doc base per WU touching docs);
+    # tokens = overhead + hops * hop_tokens + output_in_peak * est_output
     eq("est apply code", estimate([code], P, ["W1"], {"W1": "apply"}), (30000 + 11 * 2000, 11))  # 6 + 3 + 8/4
-    eq("est apply docs", estimate([doc], P, ["W1"], {"W1": "apply"}), (30000 + 13 * 2000, 13))  # 6 + 5 + 8/4
-    eq("est build new medium", estimate([new], P, ["W1"], {"W1": "build"}, {"W1": "medium"})[1], 26)
-    eq("est build new small", estimate([new], P, ["W1"], {"W1": "build"}, {"W1": "small"})[1], 14)
-    eq("est build new large", estimate([new], P, ["W1"], {"W1": "build"}, {"W1": "large"})[1], 36)
+    eq("est apply docs", estimate([doc], P, ["W1"], {"W1": "apply"}), (30000 + 16 * 2000, 16))  # 6 + 2 + 8/4 + doc base 6
+    eq("est wire docs: doc base once per WU", estimate([doc0, doc0b], P, ["W1"], {"W1": "wire"})[1], 16)  # 6 + 2 + 2 + 6
+    eq("est build new medium", estimate([new], P, ["W1"], bld, {"W1": "medium"}), (30000 + 26 * 2000 + 9000, 26))
+    eq("est build new small", estimate([new], P, ["W1"], bld, {"W1": "small"}), (30000 + 14 * 2000 + 2250, 14))
+    eq("est build new large", estimate([new], P, ["W1"], bld, {"W1": "large"}), (30000 + 36 * 2000 + 30000, 36))
+    eq("est build 3 new files", estimate([new, dict(new, path="n2.py"), dict(new, path="n3.py")], P, ["W1"], bld,
+                                         {"W1": "small"})[1], 30)  # 6 + 3 * 8
     eq("est build edit docs vs code",
-       (estimate([doc], P, ["W1"], {"W1": "build"})[1], estimate([code], P, ["W1"], {"W1": "build"})[1]), (11, 9))
+       (estimate([doc], P, ["W1"], bld)[1], estimate([code], P, ["W1"], bld)[1]), (14, 26))  # 6 + 2 + 6 ; 6 + 20
+    eq("est build edit code, no new file: tokens", estimate([code], P, ["W1"], bld, {"W1": "medium"})[0],
+       30000 + 26 * 2000 + 9000)  # est_output counts for existing files too
+    eq("est build: first existing code file costs size hops, the rest hops_edit",
+       estimate([code, code2], P, ["W1"], bld, {"W1": "medium"})[1], 29)  # 6 + 20 + 3
+    eq("est build: with a new file every existing code file costs hops_edit",
+       estimate([new, code, code2], P, ["W1"], bld, {"W1": "medium"})[1], 32)  # 6 + 20 + 3 + 3
+    eq("est build small: first existing code file costs hops_new_small",
+       estimate([code], P, ["W1"], bld, {"W1": "small"})[1], 14)  # 6 + 8
+    eq("est build: new + existing + docs", estimate([new, code, doc0, doc0b], P, ["W1"], bld, {"W1": "medium"})[1],
+       39)  # 6 + 20 + 3 + 2 + 2 + doc base 6
+    eq("est fix has no doc base", estimate([doc], P, ["W1"], {"W1": "fix"})[1], 19)  # 6 + 6 + 5 + 8/4
     eq("est fix", estimate([code], P, ["W1"], {"W1": "fix"})[1], 19)  # 6 + 6 verify + 5 + 8/4
     eq("est verify skips files", estimate([code], P, ["W1"], {"W1": "verify"})[1], 21)  # 6 + 15
     eq("est research-only has no base", estimate([code], P, ["W1"], {"W1": "research"})[1], 10)  # 8 + 2
@@ -1669,6 +1755,20 @@ def selftest():
         r, _ = quiet(estimate, [code], dict(P, hits_per_hop=bad), ["W1"], {"W1": "apply"})
         eq("est hits_per_hop=%r guarded" % (bad,), r, (30000 + 11 * 2000, 11))
     eq("est hits_per_hop=2", estimate([code], dict(P, hits_per_hop=2), ["W1"], {"W1": "apply"})[1], 13)
+
+    # output_tokens / cost_model: est_output per new file, once per build WU with none; output_in_peak share
+    eq("output: new file", output_tokens([new], P, bld, {"W1": "medium"}, ["W1"]), 18000)
+    eq("output: 3 new small files", output_tokens([new, dict(new, path="n2.py"), dict(new, path="n3.py")], P, bld,
+                                                  {"W1": "small"}, ["W1"]), 3 * 4500)
+    eq("output: existing files only = once per WU", output_tokens([code, code2], P, bld, {"W1": "large"}, ["W1"]), 60000)
+    eq("output: new + existing = new files only", output_tokens([new, code], P, bld, {"W1": "medium"}, ["W1"]), 18000)
+    eq("output: non-build writes none", output_tokens([code], P, {"W1": "apply"}, {}, ["W1"]), 0)
+    eq("output_in_peak scales the peak", estimate([new], dict(P, output_in_peak=1.0), ["W1"], bld, {"W1": "medium"})[0],
+       30000 + 26 * 2000 + 18000)
+    eq("cost_model est_output", cost_model([new], P, 90000, 26, bld, {"W1": "medium"}, ["W1"])["est_output"], 18000)
+    # 95% cache reads at 0.2 + 5% cache writes at 2.5 = 0.315 $/MTok on cum = hops * (overhead + est) / 2
+    eq("cost_model cache mix", cost_model([code], P, 70000, 20, {"W1": "apply"}, {}, ["W1"]),
+       {"est_output": 0, "est_cum_input": 1000000, "est_cost": 0.315})
     eq("cli rejects --hits-per-hop 0", quiet(main, ["plan", "--map", "x.json", "--hits-per-hop", "0"])[0], ("exit", 2))
     eq("cli rejects --hits-per-hop -1", quiet(main, ["plan", "--map", "x.json", "--hits-per-hop=-1"])[0], ("exit", 2))
     eq("pos_float ok", pos_float("0.5"), 0.5)
@@ -1705,7 +1805,45 @@ def selftest():
     # the single-agent aggregate costs docs as docs (same hops as the one cluster holding the file)
     md = {"head": "", "files": {"r.md": _map_file("docs")}, "wus": [_map_wu("W1", "apply", {"r.md": 8})]}
     pd = build_plan(md, dict(P))
-    eq("plan single-agent docs lang", (pd["single_agent_est"]["hops"], pd["clusters"][0]["est_hops"]), (13, 13))
+    eq("plan single-agent docs lang", (pd["single_agent_est"]["hops"], pd["clusters"][0]["est_hops"]), (16, 16))
+
+    # params provenance line
+    eq("source defaults", params_source_text({"calibration": None, "flags": []}), "defaults")
+    eq("source none", params_source_text(None), "defaults")
+    eq("source flags", params_source_text({"calibration": None, "flags": ["budget"]}), "defaults+flags")
+    eq("source calibration", params_source_text({"calibration": "c.json", "n": 12, "date": "2026-10-06", "flags": []}),
+       "calibration.json (n=12, 2026-10-06)")
+    eq("source calibration+flags", params_source_text({"calibration": "c.json", "n": 12, "date": "2026-10-06", "flags": ["budget"]}),
+       "calibration.json (n=12, 2026-10-06)+flags")
+    hdr = render(dict(plan2, params=dict(P, source={"calibration": "c.json", "n": 12, "date": "2026-10-06", "flags": []})), [])
+    eq("render header shows provenance", "params: calibration.json (n=12, 2026-10-06)" in hdr.split("\n")[0], True)
+
+    # calibrate: refuses below CALIB_MIN_ROWS, records provenance otherwise
+    def calib_case(nrows):
+        with tempfile.TemporaryDirectory() as d:
+            clusters = [{"id": "C%d" % i, "wus": ["W%d" % i], "commit_tag": "[W%d]" % i, "est_tokens": 60000,
+                         "est_hops": 20, "est_output": 0} for i in range(1, nrows + 1)]
+            agents = [{"description": "[W%d] x" % i, "peak_context": 40000 + 1000 * (4 + i), "tool_calls": 4 + i,
+                       "file": "/x/projects/p/sess-1/subagents/agent-%d.jsonl" % i} for i in range(1, nrows + 1)]
+            paths = {}
+            for name, obj in (("bench", {"agents": agents}), ("plan", {"clusters": clusters})):
+                paths[name] = os.path.join(d, name + ".json")
+                write_json(paths[name], obj)
+            out = os.path.join(d, "calibration.json")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cmd_calibrate(argparse.Namespace(bench=[paths["bench"]], plan=[paths["plan"]], out=out))
+            return (read_json(out, "calibration") if os.path.isfile(out) else None), buf.getvalue(), \
+                (load_calibration(out) if os.path.isfile(out) else None)
+
+    got, text, _ = calib_case(CALIB_MIN_ROWS - 1)
+    eq("calibrate refuses below the minimum rows", (got, "nothing changed" in text), (None, True))
+    got, text, loaded = calib_case(CALIB_MIN_ROWS)
+    eq("calibrate records provenance", (got["n_rows"], got["sessions"], got["date"] == time.strftime("%Y-%m-%d"),
+                                        got["rmse"], got["mean_abs_pct"], got["overhead"], got["hop_tokens"]),
+       (CALIB_MIN_ROWS, ["sess-1"], True, 0, 0.0, 40000, 1000))
+    eq("load_calibration returns constants + provenance", loaded,
+       ({"overhead": 40000, "hop_tokens": 1000}, {"n": CALIB_MIN_ROWS, "date": time.strftime("%Y-%m-%d")}))
 
     # ere_compatible(): Python-only syntax must not reach `git grep -E`
     for pat, want in (
