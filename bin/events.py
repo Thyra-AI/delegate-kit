@@ -9,23 +9,27 @@ hooks/meter.py) and prints counts by role, by level, by day (UTC), and the last 
 Location: --file, else the kit dir this script is installed in (<config>/delegate-kit/bin/ ->
 <config>/delegate-kit), else $CLAUDE_CONFIG_DIR/delegate-kit, else ~/.claude/delegate-kit.
 Malformed lines and lines without a timestamp are skipped and counted as "skipped".
-A missing log is not an error: it prints zero events.
+A missing log is not an error: it prints zero events. A log that exists but cannot be read
+(permissions, a directory passed as --file) is an error.
 
-Exit codes: 0 ok, 2 bad arguments.
+Exit codes: 0 ok, 1 unreadable log, 2 bad arguments.
 
 Stdlib only, Python >= 3.8.
 """
 import argparse
+import contextlib
 import datetime
+import io
 import json
 import os
 import sys
 import tempfile
 
 
-def default_log():
-    here = os.path.dirname(os.path.abspath(__file__))
-    if os.path.basename(here) == "bin" and os.path.basename(os.path.dirname(here)) == "delegate-kit":
+def default_log(here=None):
+    """Installed kit (a `dk` launcher beside this script) -> its own state dir; a repo checkout -> the config dir."""
+    here = here or os.path.dirname(os.path.abspath(__file__))
+    if os.path.isfile(os.path.join(here, "dk")):
         kit = os.path.dirname(here)
     else:
         cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(os.path.expanduser("~"), ".claude")
@@ -34,11 +38,14 @@ def default_log():
 
 
 def load(path, since=None):
-    """(events, skipped). Each event is a dict with a string `ts`; `since` is a 'YYYY-MM-DD' lower bound."""
+    """(events, skipped). Each event is a dict with a string `ts`; `since` is a datetime.date or 'YYYY-MM-DD'
+    lower bound, compared as a date. A missing file is (events=[], 0); any other OSError propagates."""
     events, skipped = [], 0
+    if isinstance(since, str):
+        since = datetime.datetime.strptime(since, "%Y-%m-%d").date()
     try:
         fh = open(path, encoding="utf-8", errors="replace")
-    except OSError:
+    except FileNotFoundError:
         return events, skipped
     with fh:
         for line in fh:
@@ -53,8 +60,14 @@ def load(path, since=None):
             if not isinstance(ev, dict) or not isinstance(ev.get("ts"), str) or len(ev["ts"]) < 10:
                 skipped += 1
                 continue
-            if since and ev["ts"][:10] < since:
-                continue
+            if since:
+                try:
+                    day = datetime.date.fromisoformat(ev["ts"][:10])
+                except ValueError:
+                    skipped += 1
+                    continue
+                if day < since:
+                    continue
             events.append(ev)
     return events, skipped
 
@@ -118,7 +131,22 @@ def selftest():
         check("last", [e["level"] for e in s["last"]] == ["L2", "L3"])
         ev2, _ = load(p, "2026-10-02")
         check("since", len(ev2) == 3)
+        check("since unpadded", len(load(p, "2026-10-2")[0]) == 3 and len(load(p, "2026-10-3")[0]) == 1)
         check("missing file", load(os.path.join(d, "none.jsonl")) == ([], 0))
+        try:
+            load(d)
+            check("directory file", False)
+        except OSError:
+            pass
+        with contextlib.redirect_stderr(io.StringIO()):
+            check("main directory file", main(["--file", d]) == 1)
+        kit = os.path.join(d, "kit")
+        os.makedirs(os.path.join(kit, "bin"))
+        installed = default_log(os.path.join(kit, "bin"))
+        check("checkout uses config dir", installed != os.path.join(kit, "state", "events.jsonl"))
+        with open(os.path.join(kit, "bin", "dk"), "w") as fh:
+            fh.write("")
+        check("installed uses own state", default_log(os.path.join(kit, "bin")) == os.path.join(kit, "state", "events.jsonl"))
         check("render", "total: 4 (skipped 3 malformed)" in render(s, p, sk))
     if failures:
         print("FAIL: " + ", ".join(failures))
@@ -139,13 +167,18 @@ def main(argv=None):
         return selftest()
     if args.since:
         try:
-            datetime.datetime.strptime(args.since, "%Y-%m-%d")
+            day = datetime.datetime.strptime(args.since, "%Y-%m-%d").date()
         except ValueError:
             ap.error("--since must be YYYY-MM-DD")
+        args.since = day.isoformat()
     if args.last < 0:
         ap.error("--last must be >= 0")
     path = args.file or default_log()
-    events, skipped = load(path, args.since)
+    try:
+        events, skipped = load(path, day if args.since else None)
+    except OSError as e:
+        print("dk events: cannot read %s: %s" % (path, e), file=sys.stderr)
+        return 1
     summary = summarise(events, args.last)
     if args.json:
         print(json.dumps(dict(summary, file=path, since=args.since, skipped=skipped), indent=2))

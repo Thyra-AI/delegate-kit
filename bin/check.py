@@ -480,6 +480,32 @@ def check_events():
             failures.append("events.py --since did not filter by day: %s" % (r.stdout + r.stderr).strip()[:300])
         if run_py(ROOT / "bin" / "events.py", "--since", "yesterday").returncode != 2:
             failures.append("events.py accepted a malformed --since")
+        r = run_py(ROOT / "bin" / "events.py", "--file", log, "--json", "--since", "2026-10-2")
+        try:
+            unpadded = (json.loads(r.stdout).get("total"), json.loads(r.stdout).get("since"))
+        except ValueError:
+            unpadded = None
+        if r.returncode != 0 or unpadded != (2, "2026-10-02"):
+            failures.append("events.py --since 2026-10-2 was not normalised/compared as a date: %s"
+                            % (r.stdout + r.stderr).strip()[:300])
+        r = run_py(ROOT / "bin" / "events.py", "--file", d)
+        if r.returncode == 0 or "cannot read" not in r.stderr:
+            failures.append("events.py reported a directory --file as a clean read (rc %d): %s"
+                            % (r.returncode, (r.stdout + r.stderr).strip()[:200]))
+        with tempfile.TemporaryDirectory() as cfg:
+            state = Path(cfg) / "delegate-kit" / "state"
+            state.mkdir(parents=True)
+            (state / "events.jsonl").write_text(log.read_text(encoding="utf-8"), encoding="utf-8")
+            env = dict(os.environ, CLAUDE_CONFIG_DIR=cfg)
+            r = subprocess.run([sys.executable, str(ROOT / "bin" / "events.py"), "--json"],
+                               capture_output=True, text=True, env=env)
+            try:
+                from_cfg = json.loads(r.stdout).get("total")
+            except ValueError:
+                from_cfg = None
+            if r.returncode != 0 or from_cfg != 3:
+                failures.append("events.py run from the repo bin/ ignored $CLAUDE_CONFIG_DIR/delegate-kit: %s"
+                                % (r.stdout + r.stderr).strip()[:300])
         if run_py(ROOT / "bin" / "events.py", "--selftest").returncode != 0:
             failures.append("events.py --selftest failed")
         sh = shutil.which("sh")
