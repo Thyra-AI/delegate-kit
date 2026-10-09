@@ -1515,6 +1515,15 @@ def session_of(ag):
     return re.sub(r"\.jsonl$", "", parts[-1]) if parts[-1] else ""
 
 
+def agent_of(ag):
+    """Identity of one agent run in a bench row: its "agent_id"/"agentId"/"id" field, else the transcript file
+    name (agent-<id>.jsonl); "" when the row carries neither."""
+    for k in ("agent_id", "agentId", "id"):
+        if ag.get(k):
+            return str(ag[k])
+    return posix(str(ag.get("file") or "")).split("/")[-1]
+
+
 MISS_NONE, MISS_MAIN, MISS_EMPTY = 0, 1, 2
 MISS_TEXT = {MISS_NONE: "no agent in the bench carries its tag",
              MISS_MAIN: "only the main agent carries its tag (workers are not joined)",
@@ -1552,7 +1561,7 @@ def join_report(bench, plan):
     share = DEFAULTS["output_in_peak"] if share is None else share
     rows = [{"cluster": c["id"], "tag": tag_of(ag["description"]), "peak": ag["peak_context"],
              "tool_calls": ag["tool_calls"], "est_peak": c.get("est_tokens"), "est_hops": c.get("est_hops"),
-             "out_peak": share * (c.get("est_output") or 0), "session": session_of(ag)}
+             "out_peak": share * (c.get("est_output") or 0), "session": session_of(ag), "agent": agent_of(ag)}
             for c, ag in best.values()]
     misses = {}
     for c in plan.get("clusters") or []:
@@ -1590,7 +1599,7 @@ def cmd_calibrate(a):
     plans = [read_object(p, "plan") for p in a.plan]
     if len(plans) not in (1, len(benches)):
         die("give one --plan for all benches, or one per --bench (got %d plans, %d benches)" % (len(plans), len(benches)))
-    rows, seen, dups = [], set(), 0
+    rows, seen, dups, dups_coarse = [], set(), 0, 0
     plan_misses = {}  # plan index -> {cluster id: MISS_* code}; `joined` holds clusters some bench did join (not misses)
     unknown, joined = [], {}
     for i, b in enumerate(benches):
@@ -1598,10 +1607,16 @@ def cmd_calibrate(a):
         got, misses, unk = join_report(b, plans[pi])
         for r in got:
             r["source"] = "%s#%d" % (os.path.basename(a.bench[i]), i + 1)
-            # the same spawn in two bench files (forked or overlapping runs) must count once
-            key = (r["tag"], r["peak"], r["tool_calls"])
+            # the same agent run in two bench files (forked or overlapping runs) must count once; distinct runs
+            # with equal numbers are kept. Only a row with no agent identity falls back to (tag, peak, tool calls).
+            if r["agent"]:
+                key = ("agent", r["session"], r["agent"])
+            else:
+                key = ("numbers", r["tag"], r["peak"], r["tool_calls"])
             if key in seen:
                 dups += 1
+                if key[0] == "numbers":
+                    dups_coarse += 1
                 continue
             seen.add(key)
             rows.append(r)
@@ -1615,7 +1630,8 @@ def cmd_calibrate(a):
     prev.update(load_calibration(out)[0])
     print("calibrate: %d joined row(s) from %d bench file(s), %d plan file(s)" % (len(rows), len(benches), len(plans)))
     if dups:
-        print("  dropped %d duplicate row(s) (same tag, peak and tool calls in more than one bench file)" % dups)
+        print("  dropped %d duplicate row(s) (same agent run in more than one bench file%s)" % (
+            dups, "; %d had no agent identity, matched on tag, peak and tool calls" % dups_coarse if dups_coarse else ""))
     multi = len(plans) > 1
     for pi in sorted(plan_misses):
         for c in plans[pi].get("clusters") or []:
@@ -1949,6 +1965,17 @@ def selftest():
     # the same spawn present in two bench files counts once; 9 distinct rows stay below the guard
     got, text, _ = multi_case([mk_agents(range(1, 10)), mk_agents(range(1, 10))], [mk_clusters(range(1, 10))])
     eq("calibrate drops duplicate spawns", (got, "dropped 9 duplicate" in text, "nothing changed" in text), (None, True, True))
+    # two distinct runs with equal numbers are both kept; the same agent id in two bench files counts once
+    twin = [dict(x, file="/x/projects/p/s/subagents/agent-t%d.jsonl" % i) for i, x in enumerate(mk_agents(range(1, 11), base=40000))]
+    twin2 = [dict(x, peak_context=x["peak_context"], file="/x/projects/p/s2/subagents/agent-u%d.jsonl" % i) for i, x in enumerate(twin)]
+    got, text, _ = multi_case([twin, twin2], [mk_clusters(range(1, 11))])
+    eq("calibrate keeps distinct runs with equal numbers", (got["n_rows"], "duplicate" in text), (20, False))
+    ided = [dict(x, agent_id="id%d" % i, file="/y/%d/a.jsonl" % i) for i, x in enumerate(mk_agents(range(1, 10)))]
+    got, text, _ = multi_case([ided, [dict(x) for x in ided]], [mk_clusters(range(1, 10))])
+    eq("calibrate drops the same agent id in two benches", (got, "dropped 9 duplicate" in text, "no agent identity" in text), (None, True, False))
+    bare = [{k: v for k, v in x.items() if k != "file"} for x in mk_agents(range(1, 10))]
+    got, text, _ = multi_case([bare, [dict(x) for x in bare]], [mk_clusters(range(1, 10))])
+    eq("calibrate falls back to tag/peak/calls without identity", (got, "9 had no agent identity" in text), (None, True))
     # plan/bench count mismatch is refused
     got, text, code = multi_case([mk_agents([1]), mk_agents([2]), mk_agents([3])], [mk_clusters([1]), mk_clusters([2])])
     eq("calibrate refuses 3 benches for 2 plans", (got, code), (None, 2))
