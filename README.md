@@ -57,7 +57,7 @@ You then have:
 - **`/delegate-kit:director on`** — make this project's sessions start as the orchestrator,
 - **`/delegate-kit:run <objective>`** — hand off a single objective from a normal session, and
 - seven spawnable specialists: `thinker`, `super-thinker`, `researcher`, `executer`, `partitioner`, `simple-tasks`, `bug-hunter`, and
-- the **`dk`** launcher (partition planner, bench, squash) in `~/.claude/delegate-kit/bin/` — setup prints its path, and [the next section](#partition-before-you-spawn) says what it's for.
+- the **`dk`** launcher (partition planner, bench, squash, events) in `~/.claude/delegate-kit/bin/` — setup prints its path, and [the next section](#partition-before-you-spawn) says what it's for.
 
 > **Why a setup step instead of shipping the agents directly?** Agent frontmatter is static — `tools:`
 > is read at load time with no conditionals — so a shipped definition would have to either grant tools
@@ -354,6 +354,12 @@ A `SIZE-HANDBACK` report (done / remaining with `path:line` anchors / commits / 
 | `dk bench` | Reads your Claude Code transcripts (a subagent `.jsonl`, a session, or a session id) and reports, per agent, requests, tool calls, peak context, cumulative input and cost. `--json` for machine output, `--price MODEL=IN,OUT,CW,CR` to override the rates. With `--plan schedule.json` it prints estimated vs actual per piece, matching agents to pieces by the `[Wn]` tag in their description. |
 | `dk partition calibrate --bench <bench.json> --plan <schedule.json>` | Refits the estimate constants from real runs (`bench.json` is `dk bench <session> --json`) and writes them to `~/.claude/delegate-kit/calibration.json`, which `plan` loads automatically. Worth running after every partitioned run. |
 | `dk squash` | Folds the run's commits into one per tag. See below. |
+
+**`dk events`.** Summarises the context meter's event log: totals, then counts by role, level and UTC day, and the last N events. `dk events [--since YYYY-MM-DD] [--last N] [--json] [--file PATH]`. Without `--file` it reads the log in the kit directory the script is installed in, else `$CLAUDE_CONFIG_DIR/delegate-kit`, else `~/.claude/delegate-kit`. An unpadded `--since` (`2026-7-3`) is accepted and normalised; an unreadable log (or a directory) exits 1 with `dk events: cannot read ...`.
+
+**`dk bench --summary`.** Aggregates a whole period instead of one session: `dk bench --summary --since YYYY-MM-DD [--project SLUG] [--json]` scans `<CLAUDE_CONFIG_DIR or ~/.claude>/projects` (or one project's folder) and prints a row per agent type (runs, requests, tool calls, peak context p50/p90, output, cost), then main, workers and TOTAL, plus how many forked transcript copies it removed so they are not double-counted. `--since` is a UTC date applied per response and tool call, and is required; combining `--summary` with a PATH or `--plan` is an error.
+
+**Several runs at once.** `dk partition calibrate` takes `--bench` and `--plan` more than once (or `--bench a.json b.json`), so one refit can pool many runs: pass one plan for all benches, or one plan per bench. It prints `unjoined: Cn [Wn]: <reason>` for plan pieces with no bench row and `unmatched agent in <file>` for agents whose tag is in no plan. Each `calibration.json` entry records its `source`, and `n_rows` is the pooled, de-duplicated count that the n>=10 guard checks.
 
 The partition script is advisory. It exists so the planning agent spends few tokens, and nothing stops an agent from reading or editing anywhere.
 
