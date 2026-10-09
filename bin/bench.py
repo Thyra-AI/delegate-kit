@@ -79,9 +79,11 @@ def parse_ts(s):
     try:
         s = s.replace("Z", "+00:00")
         s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s, 1)
-        return datetime.datetime.fromisoformat(s)
+        ts = datetime.datetime.fromisoformat(s)
     except (ValueError, AttributeError):
         return None
+    # An offset-less timestamp is read as UTC, so every comparison/subtraction is aware-only.
+    return ts.replace(tzinfo=datetime.timezone.utc) if ts.tzinfo is None else ts
 
 
 def analyze(path, prices, detail=None):
@@ -135,7 +137,7 @@ def analyze(path, prices, detail=None):
             g = groups.get(mid)
             if g is None:
                 g = groups[mid] = {"model": model, "in": 0, "cr": 0, "cc": 0, "out": 0, "final": False, "chars": 0, "seen": set(),
-                                "ts": ts, "seg": seg}
+                                "est": False, "ts": ts, "seg": seg}
             g["model"] = g["model"] or model
             g["in"] = max(g["in"], u.get("input_tokens") or 0)
             g["cr"] = max(g["cr"], u.get("cache_read_input_tokens") or 0)
@@ -193,6 +195,7 @@ def analyze(path, prices, detail=None):
         if est > g["out"]:
             est_out += est
             g["out"] = est
+            g["est"] = True
     models = collections.Counter(g["model"] for g in groups.values() if g["model"])
     cost, unpriced = 0.0, False
     for g in groups.values():
@@ -494,11 +497,13 @@ def summarize(files, since_ts, prices):
     first, path) order. A compact_boundary does not reset any id; it only starts a new context-peak
     segment. Returns a JSON-able dict."""
     loaded = []
+    skipped = []
     for kind, f in files:
         det = {"main": kind == "main"}
         try:
             analyze(f, prices, det)
-        except OSError:
+        except Exception:  # one unreadable/malformed transcript must not abort the whole run
+            skipped.append(f)
             continue
         for g in det["groups"].values():
             g.pop("seen", None)
@@ -522,6 +527,7 @@ def summarize(files, since_ts, prices):
             for k in ("in", "cr", "cc", "out"):
                 c[k] = max(c[k], g[k])
             c["final"] = c["final"] or g["final"]
+            c["est"] = (c["est"] or g["est"]) and not c["final"]
             c["model"] = c["model"] or g["model"]
         for tid, (name, ts) in d["tools"].items():
             if tid in tool_owner:
@@ -535,7 +541,7 @@ def summarize(files, since_ts, prices):
 
     def blank():
         return {"runs": set(), "requests": 0, "tool_calls": 0, "output": 0, "cost": 0.0,
-                "unpriced_requests": 0, "samples": {}}
+                "unpriced_requests": 0, "samples": {}, "output_estimated": 0, "unfinalized_requests": 0}
     types = collections.OrderedDict()
     for g in claimed.values():
         if not in_range(g["ts"]):
@@ -544,6 +550,10 @@ def summarize(files, since_ts, prices):
         r["runs"].add(g["file"])
         r["requests"] += 1
         r["output"] += g["out"]
+        if not g["final"]:
+            r["unfinalized_requests"] += 1
+            if g["est"]:
+                r["output_estimated"] += g["out"]
         p = price_for(g["model"], prices)
         if p is None:
             r["unpriced_requests"] += 1
@@ -559,19 +569,23 @@ def summarize(files, since_ts, prices):
         smp = list(r["samples"].values())
         return {"runs": len(r["runs"]), "requests": r["requests"], "tool_calls": r["tool_calls"],
                 "peak_p50": pctl(smp, 50), "peak_p90": pctl(smp, 90), "peak_samples": len(smp),
-                "output": r["output"], "cost": r["cost"], "unpriced_requests": r["unpriced_requests"]}
+                "output": r["output"], "cost": r["cost"], "unpriced_requests": r["unpriced_requests"],
+                "output_estimated": r["output_estimated"], "unfinalized_requests": r["unfinalized_requests"]}
 
     def merge(rs):
         m = blank()
         for r in rs:  # run/segment keys are (file, seg) pairs and a file has one type: union is exact
             m["runs"] |= r["runs"]
-            for k in ("requests", "tool_calls", "output", "cost", "unpriced_requests"):
+            for k in ("requests", "tool_calls", "output", "cost", "unpriced_requests", "output_estimated",
+                      "unfinalized_requests"):
                 m[k] += r[k]
             m["samples"].update(r["samples"])
         return fin(m)
     workers = [r for t, r in types.items() if t != "main"]
     return {"since": since_ts.date().isoformat() if since_ts else None,
             "files_scanned": len(loaded),
+            "files_skipped": len(skipped),
+            "skipped_paths": skipped[:20],
             "duplicates_removed": {"requests": dup_req, "tool_calls": dup_tool},
             "main": fin(types.get("main") or blank()),
             "workers": merge(workers),
@@ -589,7 +603,7 @@ def print_summary(sm, project):
     def line(name, r):
         c = "$%.2f%s" % (r["cost"], "+UNPRICED" if r["unpriced_requests"] else "")
         return (name, "%d" % r["runs"], "%d" % r["requests"], "%d" % r["tool_calls"],
-                num(r["peak_p50"]), num(r["peak_p90"]), "{:,}".format(r["output"]), c)
+                num(r["peak_p50"]), num(r["peak_p90"]), fmt_out(r), c)
     table = [hdr, line("main", sm["main"])]
     table += [line(t, r) for t, r in sm["by_type"].items()]
     table += [line("workers", sm["workers"]), line("TOTAL", sm["total"])]
@@ -603,6 +617,15 @@ def print_summary(sm, project):
         if n == 0 or n == len(table) - 2:
             emit("  ".join("-" * w for w in widths))
     emit("peak = context per run (main: per compaction segment); p50/p90 over runs and segments.")
+    t = sm["total"]
+    if t["unfinalized_requests"]:
+        emit("unfinalized responses: %d, output estimated from content size for ~%s tokens (a lower bound, "
+             "included in output and cost; ~ marks rows where the estimate is >= %d%% of output)" % (
+                 t["unfinalized_requests"], "{:,}".format(t["output_estimated"]), EST_FLAG_SHARE * 100))
+    if sm["files_skipped"]:
+        emit("WARNING: %d transcript file(s) skipped (parse error), not counted: %s%s" % (
+            sm["files_skipped"], ", ".join(sm["skipped_paths"][:3]),
+            " ..." if sm["files_skipped"] > 3 else ""))
 
 
 def selftest():

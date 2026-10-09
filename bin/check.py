@@ -497,6 +497,39 @@ def check_bench_summary():
                            capture_output=True, text=True, env=env, timeout=60)
         if r.returncode != 0 or "TOTAL" not in r.stdout:
             failures.append("bench --summary text output failed (%d):\n%s" % (r.returncode, (r.stdout + r.stderr).strip()))
+    # unfinalized-output estimate flag, mixed aware/naive timestamps, and a malformed transcript file
+    def unfin(mid, ts, chars):
+        return {"type": "assistant", "timestamp": ts,
+                "message": {"id": mid, "model": "claude-sonnet-x", "usage": {"input_tokens": 10, "output_tokens": 2},
+                            "content": [{"type": "text", "text": "x" * chars}]}}
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        pc = home / "projects" / "proj-c"
+        pc.mkdir(parents=True)
+        recs = [unfin("u1", "2026-03-02T10:00:00Z", 1000), unfin("u2", "2026-03-02T10:00:05", 500)]
+        (pc / "C1.jsonl").write_text("\n".join(json.dumps(x) for x in recs) + "\n", encoding="utf-8")
+        bad = unfin("bad", "2026-03-02T10:00:09Z", 10)
+        bad["message"]["usage"]["input_tokens"] = "not-a-number"
+        (pc / "C2.jsonl").write_text(json.dumps(bad) + "\n", encoding="utf-8")
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
+        cmd = [sys.executable, str(ROOT / "bin" / "bench.py"), "--summary", "--since", "2026-03-01"]
+        r = subprocess.run(cmd + ["--json"], capture_output=True, text=True, env=env, timeout=60)
+        if r.returncode != 0:
+            failures.append("bench --summary with mixed naive/aware timestamps or a bad file exited %d:\n%s"
+                            % (r.returncode, r.stderr.strip()))
+        else:
+            t = json.loads(r.stdout)
+            got = (t["total"]["requests"], t["total"]["unfinalized_requests"], t["total"]["output_estimated"],
+                   t["total"]["output"], t["files_skipped"])
+            if got != (2, 2, 600, 600, 1):
+                failures.append("bench --summary estimate/skip case: (requests, unfinalized, estimated, output, "
+                                "skipped) = %r, expected (2, 2, 600, 600, 1)" % (got,))
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=60)
+        if r.returncode != 0 or "~600" not in r.stdout or "unfinalized responses: 2" not in r.stdout \
+                or "1 transcript file(s) skipped" not in r.stdout:
+            failures.append("bench --summary text lacks the ~ estimate flag / unfinalized total / skipped notice (%d):\n%s"
+                            % (r.returncode, (r.stdout + r.stderr).strip()))
+
 
 
 def check_serena_fragment():
