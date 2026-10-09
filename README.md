@@ -29,7 +29,7 @@ Every long Claude Code session drowns in cheap work: fifteen greps to trace a fl
 | **researcher** | sonnet 5.5 (high effort) | Mapping how a system works end-to-end — **and** external research via `WebSearch`/`WebFetch` (docs, APIs, specs, changelogs). Never dumps whole files or whole pages; returns an anchored, source-cited report. |
 | **executer** | sonnet 5.5 (high effort) | The coding workhorse. Implements a settled plan end-to-end — writes/edits code, runs the build & tests, fixes what it broke. Full tools incl. Edit/Write. |
 | **partitioner** | sonnet 5.5 (medium effort) | Planning only, before any executer is spawned. Takes a list of work units, runs the partition script, strikes false hits, and returns a schedule: layers, parallel clusters, commit tags, token and cost estimates, and whether one agent is enough. Never edits source. See [Partition before you spawn](#partition-before-you-spawn). |
-| **simple-tasks** | haiku | Mechanical chores (commits, pushes, builds, file ops) **and** cheap multi-hop context-saving work. |
+| **simple-tasks** | haiku | Mechanical chores (commits, builds, file ops; never pushes) **and** cheap multi-hop context-saving work. |
 | **bug-hunter** | haiku | Hunting real defects in a listed set of files or a diff. Never edits, never comments on style. Returns findings inline — or writes a JSON shard and returns one status line, so you can fan many out across a whole codebase. |
 
 The **`/subagents`** skill is the playbook: it gives the main agent the roster, briefing rules for each agent, and a decision guide for picking the right one — including the classic chain **researcher maps → thinker decides → executer builds, verifies & commits**. Run your session as the **director** and it applies that playbook itself, on every turn, without you having to.
@@ -353,9 +353,9 @@ The partition script is advisory. It exists so the planning agent spends few tok
 - `stash`, `restore`, `clean`, `rebase`, `filter-branch`, `filter-repo`, `checkout` and `switch`,
 - `reset --hard` or `--merge`, `commit --amend`, `branch -D`,
 - `add -A`, `add .` and the other add-everything forms,
-- `push --force`, `--delete` and `--mirror`.
+- every `git push`, plain or forced, however it is chained or wrapped. Pushes run in the main session: a subagent commits its work and reports `ready to push: <branch> @ <sha>`.
 
-`git add <paths>`, `commit`, `log`, `diff`, `status` and `show` pass. `checkout` and `switch` are blocked outright, since `checkout <file>` and `checkout <branch>` can't be told apart and either one disturbs a tree other agents are working in. The hook covers **subagents only**: your own session is untouched. It is a guardrail against habitual commands, not a sandbox. It doesn't catch `bash -c` in every form, `$(...)`, aliases, or `python -c "import subprocess..."`, and it fails open, so a bug in the hook never blocks your agents.
+`git add <paths>`, `commit`, `log`, `diff`, `status` and `show` pass. When you push from your own session, run it as a background Bash call (`run_in_background: true`), because a pre-push review such as review-gate's can exceed the 10-minute foreground limit; the agent tells you it is running, does not poll, and reports the review verdict when the completion notification arrives. `checkout` and `switch` are blocked outright, since `checkout <file>` and `checkout <branch>` can't be told apart and either one disturbs a tree other agents are working in. The hook covers **subagents only**: your own session is untouched. It is a guardrail against habitual commands, not a sandbox. It doesn't catch `bash -c` in every form, `$(...)`, aliases, or `python -c "import subprocess..."`, and it fails open, so a bug in the hook never blocks your agents.
 
 ## Integrations — the agents are wired for what you actually have
 
@@ -463,7 +463,7 @@ Nothing here is hidden. This is everything delegate-kit executes or writes on yo
 only when the call comes from a **subagent** — your own session's commands are never touched. It
 denies destructive git: `stash`, `restore`, `clean`, `rebase`, `checkout`, `switch`,
 `filter-branch`/`filter-repo`, `reset --hard`/`--merge`, `commit --amend`, forced branch delete or
-move, `add -A`/`-u`/`.` (explicit paths only), and force, delete or mirror pushes. It only ever
+move, `add -A`/`-u`/`.` (explicit paths only), and every push (pushes run in the main session). It only ever
 **denies**; it never auto-approves anything. A command it does not recognise passes through with no
 decision, so Claude Code's normal permission prompts and your own allow/deny rules apply exactly as
 before. It is regex lexing in stdlib Python — a guardrail against habitual commands, not a sandbox.

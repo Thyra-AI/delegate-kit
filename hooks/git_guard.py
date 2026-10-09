@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse hook (matcher: Bash) - deny destructive git commands to subagents.
+"""PreToolUse hook (matcher: Bash) - deny destructive git commands and all pushes to subagents.
 
 Reads the hook JSON on stdin. Acts only when the input carries an `agent_id`
 (i.e. the call comes from a subagent); the user's own session is never touched.
@@ -29,6 +29,13 @@ ALWAYS_DENY = {
     "checkout": "checkout switches branches / discards file changes in a shared tree",
     "switch": "switch changes the branch of a shared tree",
 }
+
+# Every push from a subagent is denied; pushes run in the main session.
+PUSH_DENY = "push runs in the main session"
+PUSH_MESSAGE = (
+    "git_guard: pushes run in the main session. Commit your work, then report "
+    "`ready to push: <branch> @ <sha>` instead of pushing."
+)
 
 WRAPPERS = {
     "sudo", "doas", "env", "command", "exec", "time", "nice", "nohup", "xargs",
@@ -235,17 +242,7 @@ def judge(sub, rest):
             if not fl and ADD_ALL_PATHSPEC.match(a):
                 return "add explicit paths only (`git add <path> ...`), never the whole tree"
     elif sub == "push":
-        for a, fl in flags(rest):
-            if fl and (
-                cluster_has(a, "fd")
-                or a.startswith("--force")
-                or opt_is(a, "--force", 4)
-                or opt_is(a, "--delete", 4)
-                or opt_is(a, "--mirror", 3)
-            ):
-                return "force/delete/mirror push"
-            if not fl and len(a) > 1 and a[0] in "+:":
-                return "forced or deleting refspec push"
+        return PUSH_DENY
     return None
 
 
@@ -266,6 +263,8 @@ def check_command(cmd, depth=0):
             sub, rest = split_global(gargs)
             if sub:
                 why = judge(sub, rest)
+                if why == PUSH_DENY:
+                    return PUSH_MESSAGE
                 if why:
                     return (
                         "git_guard: `%s` is blocked for subagents (%s). Do not run it or "
@@ -312,8 +311,6 @@ PASS = [
     "git show HEAD",
     "git grep -n foo",
     "git rev-parse HEAD",
-    "git push origin main",
-    "git push -u origin feature",
     "git reset HEAD a.py",
     "git reset --soft HEAD~1",
     "git reset --mixed HEAD~1",
@@ -326,9 +323,9 @@ PASS = [
     "git add --dry-run a.py",
     "git add --patch a.py",
     "git add --intent-to-add a.py",
-    "git push --dry-run",
-    "git push --follow-tags origin main",
-    "git push --set-upstream origin main",
+    "echo git push",
+    "git commit -m 'run git push later'",
+    "git log --oneline origin/main..HEAD",
     "git branch --format=%(refname)",
     "git branch --delete merged",
     "git branch --list",
@@ -399,6 +396,28 @@ DENY = [
     "git branch -M stable",
     "git branch -C x y",
     "git branch --force x HEAD",
+    "git push",
+    "git push origin main",
+    "git push -u origin feature",
+    "git push --dry-run",
+    "git push --follow-tags origin main",
+    "git push --set-upstream origin main",
+    "git push origin HEAD:refs/heads/main",
+    "git status && git push",
+    "git commit -m x; git push origin main",
+    "git log | head; git push",
+    "git -C sub push origin main",
+    "git -c core.pager=cat push",
+    "sudo git push",
+    "timeout 60 git push origin main",
+    "FOO=1 git push",
+    "env GIT_TERMINAL_PROMPT=0 git push",
+    "/usr/bin/git push origin main",
+    "git.exe push",
+    "sh -c \"git push origin main\"",
+    "bash -lc 'cd x && git push'",
+    "(git push)",
+    "if true; then git push; fi",
     "git push -f",
     "git push --force-with-lease origin main",
     "git push origin --delete old",
@@ -424,6 +443,8 @@ PAYLOADS = [
     # (payload, expect_deny)
     ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "git -C . stash"}}, True),
     ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "git add a.py"}}, False),
+    ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "git push origin main"}}, True),
+    ({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}, False),  # main session
     ({"tool_name": "Bash", "tool_input": {"command": "git stash"}}, False),  # main session
     ({"agent_id": "", "tool_name": "Bash", "tool_input": {"command": "git stash"}}, False),
     ({"agent_id": "a1", "tool_name": "Read", "tool_input": {"command": "git stash"}}, False),
@@ -436,6 +457,10 @@ PAYLOADS = [
 def selftest():
     bad = 0
     total = 0
+    total += 1
+    if check_command("git push origin main") != PUSH_MESSAGE:
+        bad += 1
+        print("FAIL (push deny reason text)")
     for cmd in PASS:
         total += 1
         r = check_command(cmd)

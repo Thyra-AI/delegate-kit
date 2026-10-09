@@ -143,6 +143,7 @@ Close out an objective with one consolidated result. When you were spawned, this
 - **Verified** — the checks that actually ran and their real results. For anything that failed, including pre-existing failures, the verbatim lines that say why.
 - **Open** — what you deliberately skipped, what you ran out of budget for, and any question you're bouncing back with your recommendation.
 - **Ledger** — the run directory path, so the caller can read the full artifacts without asking you for them.
+- **Push line** — when commits landed, end the report with one line, `ready to push: <branch> @ <shas>`. Nothing in your fleet pushes (the git guard denies it for every subagent) and you have no Bash; the user, or your caller's main session, pushes.
 
 Keep every section to what matters for the future: decisions and conclusions, what changed, what is still open, risks. No narration of the steps your agents took, no restating the objective at length, no pasted logs or test output beyond the failing lines. The ledger and the agents' on-disk transcripts hold the rest, and your caller consults them when it needs to.
 
