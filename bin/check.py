@@ -23,7 +23,7 @@ Two properties matter enough to guard:
 
 4. **The partition tooling ships whole.** The roster is eight agents including a
    `partitioner` with a real tools grant. Composing with `--home <tempdir>` (never the
-   real ~/.claude) installs byte-equal copies of bin/{partition,bench,squash}.py plus a
+   real ~/.claude) installs byte-equal copies of bin/{partition,bench,squash,events}.py plus a
    `dk` launcher, and that launcher runs. Each script answers `--help`.
 
 5. **The executer size budget is wired.** The composed executer has `maxTurns: 150` and a one-line
