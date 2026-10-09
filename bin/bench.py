@@ -2,6 +2,7 @@
 """bench.py - per-agent cost report from real Claude Code transcripts.
 
     python bin/bench.py PATH [--json] [--plan partition.json] [--price sonnet=2,10,2.5,0.2 ...]
+    python bin/bench.py --summary --since YYYY-MM-DD [--project SLUG] [--json]
 
 PATH is one of
   - a subagent transcript  (.../<sessionId>/subagents/agent-<id>.jsonl)
@@ -30,6 +31,13 @@ and tool input were, so the real figure is not in the file. For those responses 
 estimated as EST_TOK_PER_CHAR x the characters of the thinking/text/tool_use blocks (a lower bound:
 thinking text is a summary of the real thinking), and a row where the estimate is >= 10% of its
 output is marked `~`. `--json` always carries `output_estimated` and `unfinalized_requests`.
+
+--summary --since D [--project SLUG] aggregates every session transcript (and its subagents/) under
+<config>/projects[/SLUG]: requests, tool calls, peak-context p50/p90, output and cost per agent type, then
+main vs workers. A forked or resumed session re-writes the parent's history as identical lines in
+another file, with no marker field, so a response counts once globally by `message.id` (fallback
+`requestId`), a tool call once by `tool_use.id`; sidechain lines are counted from subagents/ only. A
+`compact_boundary` does not reset ids; it starts a new context-peak segment.
 
 Stdlib only, Python >= 3.8.
 """
@@ -76,14 +84,19 @@ def parse_ts(s):
         return None
 
 
-def analyze(path, prices):
-    """Stream one transcript; return a dict of stats."""
+def analyze(path, prices, detail=None):
+    """Stream one transcript; return a dict of stats. `detail` (a dict, --summary only) receives the
+    per-response groups ("groups", each with its first timestamp "ts" and compaction segment "seg"),
+    the tool calls ("tools": id -> (name, ts)) and the file start; with detail["main"] set, sidechain
+    lines in a main transcript are skipped (subagent lines are counted from subagents/ only)."""
     groups = collections.OrderedDict()  # message.id -> dict
     tool_ids = set()
     hist = collections.Counter()
     read_files, edit_files = set(), set()
     t_first = t_last = None
     anon = 0
+    seg = 0
+    tool_info = {}
     with open(path, encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             raw = raw.strip()
@@ -101,6 +114,11 @@ def analyze(path, prices):
                     t_first = ts
                 if t_last is None or ts > t_last:
                     t_last = ts
+            if d.get("type") == "system" and d.get("subtype") == "compact_boundary":
+                seg += 1  # compaction boundary: ids keep counting, the context peak restarts
+                continue
+            if detail is not None and detail.get("main") and d.get("isSidechain"):
+                continue
             if d.get("type") != "assistant":
                 continue
             msg = d.get("message")
@@ -116,7 +134,8 @@ def analyze(path, prices):
             u = msg.get("usage") or {}
             g = groups.get(mid)
             if g is None:
-                g = groups[mid] = {"model": model, "in": 0, "cr": 0, "cc": 0, "out": 0, "final": False, "chars": 0, "seen": set()}
+                g = groups[mid] = {"model": model, "in": 0, "cr": 0, "cc": 0, "out": 0, "final": False, "chars": 0, "seen": set(),
+                                "ts": ts, "seg": seg}
             g["model"] = g["model"] or model
             g["in"] = max(g["in"], u.get("input_tokens") or 0)
             g["cr"] = max(g["cr"], u.get("cache_read_input_tokens") or 0)
@@ -155,6 +174,7 @@ def analyze(path, prices):
                     continue
                 tool_ids.add(tid)
                 name = b.get("name") or "?"
+                tool_info[tid] = (name, ts)
                 hist[name] += 1
                 inp = b.get("input") or {}
                 fp = inp.get("file_path") if isinstance(inp, dict) else None
@@ -183,6 +203,8 @@ def analyze(path, prices):
         cost += (g["in"] * p[0] + g["out"] * p[1] + g["cc"] * p[2] + g["cr"] * p[3]) / 1e6
     ctx = [g["in"] + g["cr"] + g["cc"] for g in groups.values()]
     wall = (t_last - t_first).total_seconds() if t_first and t_last else 0.0
+    if detail is not None:
+        detail.update(groups=groups, tools=tool_info, start=t_first)
     return {
         "model": models.most_common(1)[0][0] if models else None,
         "requests": len(groups),
@@ -420,6 +442,169 @@ def print_clusters(rows):
             emit("  ".join("-" * w for w in widths))
 
 
+def aware(ts):
+    if ts is not None and ts.tzinfo is None:
+        return ts.replace(tzinfo=datetime.timezone.utc)
+    return ts
+
+
+def pctl(vals, q):
+    """Linear-interpolated percentile (q in 0..100) of a list; None when empty."""
+    if not vals:
+        return None
+    v = sorted(vals)
+    k = (len(v) - 1) * q / 100.0
+    lo = int(k)
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (k - lo)
+
+
+def summary_files(project, since_ts):
+    """[(kind, path)] for every main transcript and subagent transcript under the projects dir
+    (one slug, or all). A file last written before --since cannot hold a newer record: skipped."""
+    root = os.path.join(config_dir(), "projects")
+    if project:
+        slugs = [project]
+        if not os.path.isdir(os.path.join(root, project)):
+            sys.exit("bench: no project %r under %s" % (project, root))
+    else:
+        slugs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))) \
+            if os.path.isdir(root) else []
+    floor = since_ts.timestamp() - 86400 if since_ts else None
+    out = []
+    for slug in slugs:
+        base = os.path.join(root, slug)
+        found = [("main", f) for f in glob.glob(os.path.join(base, "*.jsonl"))]
+        found += [("agent", f) for f in glob.glob(os.path.join(base, "*", "subagents", "*.jsonl"))]
+        for kind, f in sorted(found):
+            try:
+                if floor is not None and os.path.getmtime(f) < floor:
+                    continue
+            except OSError:
+                continue
+            out.append((kind, f))
+    return out
+
+
+def summarize(files, since_ts, prices):
+    """Aggregate bench rows over many transcripts without double-counting forked/resumed copies.
+    Copied history re-appears as identical lines in another session file, so nothing is keyed on a
+    file: a response counts once globally by message.id (fallback requestId; split lines merge by
+    per-field max), a tool call once by tool_use.id, assigned to the first file in (start, main
+    first, path) order. A compact_boundary does not reset any id; it only starts a new context-peak
+    segment. Returns a JSON-able dict."""
+    loaded = []
+    for kind, f in files:
+        det = {"main": kind == "main"}
+        try:
+            analyze(f, prices, det)
+        except OSError:
+            continue
+        for g in det["groups"].values():
+            g.pop("seen", None)
+        meta = load_meta(f) if kind == "agent" else {}
+        det.update(kind=kind, path=f, type="main" if kind == "main" else (meta.get("agentType") or "?"))
+        loaded.append(det)
+    far = datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
+    loaded.sort(key=lambda d: (aware(d["start"]) or far, d["kind"] != "main", d["path"]))
+
+    claimed, tool_owner = {}, {}
+    dup_req = dup_tool = 0
+    for fi, d in enumerate(loaded):
+        for mid, g in d["groups"].items():
+            if mid.startswith("anon-"):
+                mid = "%d:%s" % (fi, mid)  # no id to dedupe on: stays file-local
+            c = claimed.get(mid)
+            if c is None:
+                claimed[mid] = dict(g, file=fi)
+                continue
+            dup_req += 1
+            for k in ("in", "cr", "cc", "out"):
+                c[k] = max(c[k], g[k])
+            c["final"] = c["final"] or g["final"]
+            c["model"] = c["model"] or g["model"]
+        for tid, (name, ts) in d["tools"].items():
+            if tid in tool_owner:
+                dup_tool += 1
+            else:
+                tool_owner[tid] = (fi, ts)
+
+    def in_range(ts):
+        ts = aware(ts)
+        return since_ts is None or ts is None or ts >= since_ts
+
+    def blank():
+        return {"runs": set(), "requests": 0, "tool_calls": 0, "output": 0, "cost": 0.0,
+                "unpriced_requests": 0, "samples": {}}
+    types = collections.OrderedDict()
+    for g in claimed.values():
+        if not in_range(g["ts"]):
+            continue
+        r = types.setdefault(loaded[g["file"]]["type"], blank())
+        r["runs"].add(g["file"])
+        r["requests"] += 1
+        r["output"] += g["out"]
+        p = price_for(g["model"], prices)
+        if p is None:
+            r["unpriced_requests"] += 1
+        else:
+            r["cost"] += (g["in"] * p[0] + g["out"] * p[1] + g["cc"] * p[2] + g["cr"] * p[3]) / 1e6
+        key = (g["file"], g["seg"])
+        r["samples"][key] = max(r["samples"].get(key, 0), g["in"] + g["cr"] + g["cc"])
+    for fi, ts in tool_owner.values():
+        if in_range(ts):
+            types.setdefault(loaded[fi]["type"], blank())["tool_calls"] += 1
+
+    def fin(r):
+        smp = list(r["samples"].values())
+        return {"runs": len(r["runs"]), "requests": r["requests"], "tool_calls": r["tool_calls"],
+                "peak_p50": pctl(smp, 50), "peak_p90": pctl(smp, 90), "peak_samples": len(smp),
+                "output": r["output"], "cost": r["cost"], "unpriced_requests": r["unpriced_requests"]}
+
+    def merge(rs):
+        m = blank()
+        for r in rs:  # run/segment keys are (file, seg) pairs and a file has one type: union is exact
+            m["runs"] |= r["runs"]
+            for k in ("requests", "tool_calls", "output", "cost", "unpriced_requests"):
+                m[k] += r[k]
+            m["samples"].update(r["samples"])
+        return fin(m)
+    workers = [r for t, r in types.items() if t != "main"]
+    return {"since": since_ts.date().isoformat() if since_ts else None,
+            "files_scanned": len(loaded),
+            "duplicates_removed": {"requests": dup_req, "tool_calls": dup_tool},
+            "main": fin(types.get("main") or blank()),
+            "workers": merge(workers),
+            "by_type": {t: fin(r) for t, r in sorted(types.items(), key=lambda kv: -kv[1]["requests"])
+                        if t != "main"},
+            "total": merge(list(types.values()))}
+
+
+def print_summary(sm, project):
+    hdr = ("agent type", "runs", "req", "tools", "peak p50", "peak p90", "output", "cost")
+
+    def num(v):
+        return "-" if v is None else "{:,}".format(int(round(v)))
+
+    def line(name, r):
+        c = "$%.2f%s" % (r["cost"], "+UNPRICED" if r["unpriced_requests"] else "")
+        return (name, "%d" % r["runs"], "%d" % r["requests"], "%d" % r["tool_calls"],
+                num(r["peak_p50"]), num(r["peak_p90"]), "{:,}".format(r["output"]), c)
+    table = [hdr, line("main", sm["main"])]
+    table += [line(t, r) for t, r in sm["by_type"].items()]
+    table += [line("workers", sm["workers"]), line("TOTAL", sm["total"])]
+    widths = [max(len(row[i]) for row in table) for i in range(len(hdr))]
+    emit("bench summary since %s%s: %d transcript file(s); forked/resumed copies removed: "
+         "%d request(s), %d tool call(s)" % (
+             sm["since"], " (project %s)" % project if project else "", sm["files_scanned"],
+             sm["duplicates_removed"]["requests"], sm["duplicates_removed"]["tool_calls"]))
+    for n, row in enumerate(table):
+        emit("  ".join(c.rjust(widths[i]) if i else c.ljust(widths[i]) for i, c in enumerate(row)).rstrip())
+        if n == 0 or n == len(table) - 2:
+            emit("  ".join("-" * w for w in widths))
+    emit("peak = context per run (main: per compaction segment); p50/p90 over runs and segments.")
+
+
 def selftest():
     """Content-size estimate for unfinalized responses: dedup across split lines."""
     def line(mid, blocks):
@@ -479,13 +664,29 @@ def main():
     if sys.argv[1:] == ["--selftest"]:
         sys.exit(selftest())
     ap = argparse.ArgumentParser(description="Per-agent cost report from Claude Code transcripts.")
-    ap.add_argument("path", metavar="PATH", help="subagent .jsonl, session dir / main .jsonl, or sessionId")
+    ap.add_argument("path", metavar="PATH", nargs="?",
+                    help="subagent .jsonl, session dir / main .jsonl, or sessionId (not used with --summary)")
+    ap.add_argument("--summary", action="store_true",
+                    help="aggregate every session under the projects dir (needs --since): totals per agent type "
+                         "and main vs workers, forked/resumed copies de-duplicated")
+    ap.add_argument("--since", metavar="YYYY-MM-DD", help="--summary: only requests/tool calls on or after this UTC date")
+    ap.add_argument("--project", metavar="SLUG", help="--summary: only this project directory under projects/")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--plan", metavar="PLAN_JSON",
                     help="partition.json: add a per-cluster est-vs-actual table, agents grouped by their [Wn] tag")
     ap.add_argument("--price", action="append", default=[], metavar="MODEL=IN,OUT,CW,CR",
                     help="override $/MTok for a model substring, e.g. sonnet=2,10,2.5,0.2 (repeatable)")
     args = ap.parse_args()
+
+    if args.summary:
+        if args.path or args.plan:
+            ap.error("--summary takes no PATH or --plan (it scans the projects dir)")
+        if not args.since:
+            ap.error("--summary needs --since YYYY-MM-DD")
+    elif args.since or args.project:
+        ap.error("--since and --project only apply with --summary")
+    elif not args.path:
+        ap.error("PATH is required (or use --summary --since YYYY-MM-DD)")
 
     prices = collections.OrderedDict()
     for spec in args.price:
@@ -499,6 +700,21 @@ def main():
         prices[k.strip().lower()] = nums
     for k, v in PRICES.items():
         prices.setdefault(k, v)
+
+    if args.summary:
+        try:
+            since_ts = datetime.datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            ap.error("bad --since %r (want YYYY-MM-DD)" % args.since)
+        sm = summarize(summary_files(args.project, since_ts), since_ts, prices)
+        if args.json:
+            sm["project"] = args.project
+            sm["prices_per_mtok"] = {k: list(v) for k, v in prices.items()}
+            sm["prices_note"] = "default prices are unverified"
+            print(json.dumps(sm, indent=2))
+        else:
+            print_summary(sm, args.project)
+        return
 
     rows = []
     for kind, f in resolve(args.path):

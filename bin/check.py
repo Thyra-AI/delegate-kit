@@ -429,6 +429,76 @@ def check_scripts_and_guard():
         failures.append("hooks/hooks.json does not reference hooks/git_guard.py")
 
 
+def check_bench_summary():
+    """`bench --summary` on synthetic transcripts holding a forked copy (a second session file that
+    re-writes the parent's lines, plus its own new response) and a compaction boundary: the copy must
+    not double-count requests, tool calls or cost, and --since / --project must narrow the result."""
+    def asst(mid, ts, tokens_in, out, tools=(), side=False):
+        rec = {"type": "assistant", "timestamp": ts, "isSidechain": side,
+               "message": {"id": mid, "model": "claude-sonnet-x", "stop_reason": "end_turn",
+                           "usage": {"input_tokens": tokens_in, "output_tokens": out},
+                           "content": [{"type": "tool_use", "id": t, "name": n, "input": {"k": t}}
+                                       for t, n in tools]}}
+        return rec
+    boundary = {"type": "system", "subtype": "compact_boundary", "timestamp": "2026-03-02T10:01:30Z",
+                "compactMetadata": {"trigger": "auto", "preTokens": 9, "postTokens": 1}}
+    m1 = asst("m1", "2026-03-02T10:01:00Z", 1000, 50, [("t1", "Agent"), ("t2", "Bash")])
+    parent = [m1, m1, boundary,  # a response written twice (split line)
+              asst("m3", "2026-03-02T10:02:00Z", 3000, 20, [("t3", "Read")]),
+              asst("s9", "2026-03-02T10:02:30Z", 9999, 9, [("t9", "Bash")], side=True)]
+    child = [asst("a1", "2026-03-02T10:01:10Z", 500, 10, [("b1", "Bash")], side=True),
+             asst("a2", "2026-03-02T10:01:20Z", 700, 10, side=True)]
+    fork = parent + [asst("m4", "2026-03-02T10:03:00Z", 4000, 5, [("t4", "Bash")])]
+
+    def put(path, recs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        pa, pb = home / "projects" / "proj-a", home / "projects" / "proj-b"
+        for sid in ("S1", "S2"):  # S2 is the fork: same history, same subagent run, one new response
+            put(pa / (sid + ".jsonl"), parent if sid == "S1" else fork)
+            put(pa / sid / "subagents" / "agent-a1.jsonl", child)
+            (pa / sid / "subagents" / "agent-a1.meta.json").write_text(
+                json.dumps({"agentType": "executer", "description": "[W1] x", "toolUseId": "t1"}), encoding="utf-8")
+        put(pb / "B1.jsonl", [asst("ob", "2026-01-01T00:00:00Z", 100, 1, [("o1", "Bash")]),
+                              asst("nb", "2026-03-05T00:00:00Z", 100, 1, [("n1", "Bash")])])
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
+
+        def summary(*extra):
+            r = subprocess.run([sys.executable, str(ROOT / "bin" / "bench.py"), "--summary", "--json", *extra],
+                               capture_output=True, text=True, env=env, timeout=60)
+            if r.returncode != 0:
+                failures.append("bench --summary %s exited %d:\n%s" % (" ".join(extra), r.returncode, r.stderr.strip()))
+                return None
+            return json.loads(r.stdout)
+        a = summary("--since", "2026-03-01", "--project", "proj-a")
+        if a:
+            main, ex = a["main"], a["by_type"].get("executer", {})
+            want = [("main requests", main["requests"], 3), ("main tool calls", main["tool_calls"], 4),
+                    ("executer requests", ex.get("requests"), 2), ("executer tool calls", ex.get("tool_calls"), 1),
+                    ("executer runs", ex.get("runs"), 1), ("main peak p50", main["peak_p50"], 3000),
+                    ("main peak p90", main["peak_p90"], 3800), ("executer peak", ex.get("peak_p50"), 700),
+                    ("total requests", a["total"]["requests"], 5), ("duplicate requests", a["duplicates_removed"]["requests"], 4),
+                    ("duplicate tool calls", a["duplicates_removed"]["tool_calls"], 4)]
+            for name, got, exp in want:
+                if got != exp:
+                    failures.append("bench --summary forked-duplicate case: %s = %r, expected %r" % (name, got, exp))
+            if abs(a["total"]["cost"] - 0.01935) > 1e-9:
+                failures.append("bench --summary cost %r, expected 0.01935 (a forked copy was double-counted)"
+                                % a["total"]["cost"])
+        both = summary("--since", "2026-03-01")
+        if both and both["main"]["requests"] != 4:
+            failures.append("bench --summary over all projects: %r main requests, expected 4" % both["main"]["requests"])
+        late = summary("--since", "2026-03-04")
+        if late and (late["main"]["requests"], late["workers"]["requests"]) != (1, 0):
+            failures.append("bench --summary --since 2026-03-04 kept older requests: %r" % (late["main"],))
+        r = subprocess.run([sys.executable, str(ROOT / "bin" / "bench.py"), "--summary", "--since", "2026-03-01"],
+                           capture_output=True, text=True, env=env, timeout=60)
+        if r.returncode != 0 or "TOTAL" not in r.stdout:
+            failures.append("bench --summary text output failed (%d):\n%s" % (r.returncode, (r.stdout + r.stderr).strip()))
+
+
 def check_serena_fragment():
     """The Serena fragment must carry the exact 1.5.3 parameter names that agents
     habitually get wrong, the activation step, and must not send agents to
@@ -587,6 +657,7 @@ def main():
     check_serena_fragment()
     check_install()
     check_scripts_and_guard()
+    check_bench_summary()
     check_card_and_main_hooks()
     check_events()
 
