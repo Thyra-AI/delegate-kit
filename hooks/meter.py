@@ -39,10 +39,11 @@ DEFAULTS = {
 }
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-DENY_REASON = ("Size budget reached: only single commands are allowed now - `git status`, `git diff`, "
-               "`git log -1`, `git add <explicit paths>`, `git commit -m '<msg>'` (run add and commit as separate "
-               "calls; no `&&`, `cd`, heredoc, `$()`, `-a`). Finish edits to files you already changed, commit, "
-               "then return SIZE-HANDBACK.")
+DENY_REASON = ("Size budget reached: only single commands are allowed now - `git status`, "
+               "`git diff --stat` (or `--name-only` / `--name-status`, optionally `--cached`), `git log -1` "
+               "(or `-n <=5`), `git add <explicit file paths>`, `git commit -m '<msg>'` (run add and commit as "
+               "separate calls; no `&&`, `cd`, heredoc, `$()`, `-a`, globs, directories). Finish edits to files "
+               "you already changed, commit, then return SIZE-HANDBACK.")
 
 
 # ------------------------------------------------------------------ paths, config, state
@@ -98,14 +99,21 @@ def prune_state(d):
                 pass
 
 
-def load_state(key):
-    try:
-        with open(state_path(key), encoding="utf-8") as fh:
-            st = json.load(fh)
-        if isinstance(st, dict):
-            return st
-    except Exception:
-        pass
+def load_state(key, retries=1):
+    """The state dict, or None when missing/unreadable. A read that fails for any reason other than
+    'no such file' (Windows scanner, concurrent replace) is retried `retries` times."""
+    for attempt in range(retries + 1):
+        try:
+            with open(state_path(key), encoding="utf-8") as fh:
+                st = json.load(fh)
+            if isinstance(st, dict):
+                return st
+            return None
+        except FileNotFoundError:
+            return None
+        except Exception:
+            if attempt < retries:
+                time.sleep(0.05)
     return None
 
 
@@ -119,7 +127,14 @@ def save_state(key, st):
     tmp = "%s.%d.tmp" % (p, os.getpid())
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(st, fh)
-    os.replace(tmp, p)
+    for attempt in range(4):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError:
+            if attempt == 3:
+                raise
+            time.sleep(0.05)
 
 
 def log_event(payload, role, level, context, calls):
@@ -358,7 +373,12 @@ def executer_post(payload):
 _META = re.compile(r"[;&|<>`(){}\n\r\\#$]")
 _ADD_BAD = re.compile(r"^(\.{1,2}/*|:.*|~.*)$|[*?\[]|[/\\]$")
 _COMMIT_FLAGS = {"-q", "--quiet", "-s", "--signoff"}
-_DIFF_BAD = ("--output", "--ext-diff", "--open-files-in-pager", "-O")
+_GLOB = re.compile(r"[*?\[]")
+_STATUS_FLAGS = {"-s", "--short", "-b", "--branch", "-sb", "-bs", "--porcelain", "--porcelain=v1",
+                 "--porcelain=v2", "--long", "--no-color", "-uno", "-unormal", "--untracked-files=no",
+                 "--untracked-files=normal"}
+_DIFF_BOUNDED = ("--stat", "--name-only", "--name-status")
+_DIFF_FLAGS = set(_DIFF_BOUNDED) | {"--cached", "--staged", "--no-color"}
 
 
 def split_simple(cmd):
@@ -417,41 +437,57 @@ def _log_ok(args):
             v, i = a[12:], i + 1
         elif a.startswith("-n") and len(a) > 2:
             v, i = a[2:], i + 1
-        elif len(a) > 1 and a[0] == "-" and a[1:].isdigit():
+        elif len(a) > 1 and a[0] == "-" and a[1:].isascii() and a[1:].isdigit():
             v, i = a[1:], i + 1
         elif a in _LOG_FORMATS:
             i += 1
             continue
         else:
             return False
-        if not v.isdigit() or not 1 <= int(v) <= 5 or n is not None:
+        if not (v.isascii() and v.isdigit()) or not 1 <= int(v) <= 5 or n is not None:
             return False
         n = int(v)
     return n is not None
 
 
-def bash_allowed(cmd):
-    """True only for `git status|diff|log -1|add <explicit paths>|commit` as ONE simple command."""
+def _plain_args(args, flags):
+    """Every arg is `--`, a listed flag, or a glob-free operand that does not start with `-`."""
+    for a in args:
+        if a == "--":
+            continue
+        if _GLOB.search(a) or (a.startswith("-") and a not in flags):
+            return False
+    return True
+
+
+def _is_dir(p, cwd):
+    return os.path.isdir(os.path.join(cwd, p) if cwd else p)
+
+
+def bash_allowed(cmd, cwd=None):
+    """True only for `git status|diff --stat|log -1|add <explicit file paths>|commit` as ONE simple command.
+    May raise on malformed input; the gate treats an exception as a deny."""
     toks = split_simple(cmd) if isinstance(cmd, str) else None
     if not toks or len(toks) < 2 or toks[0] != "git":
         return False
     sub, args = toks[1], toks[2:]
     if sub == "status":
-        return True
+        return _plain_args(args, _STATUS_FLAGS)
     if sub == "diff":
-        return not any(a == b or a.startswith(b + "=") for a in args for b in _DIFF_BAD)
+        return _plain_args(args, _DIFF_FLAGS) and any(a in _DIFF_BOUNDED for a in args)
     if sub == "log":
         return _log_ok(args)
     if sub == "add":
         paths = [a for a in args if a != "--"]
-        return bool(paths) and not any(a.startswith("-") or _ADD_BAD.search(a) for a in paths)
+        return bool(paths) and not any(a.startswith("-") or _ADD_BAD.search(a) or _is_dir(a, cwd) for a in paths)
     if sub == "commit":
         i, has_msg = 0, False
         while i < len(args):
             a = args[i]
             if a == "--":
                 paths = args[i + 1:]
-                return has_msg and not any(_ADD_BAD.search(p) or p.startswith("-") for p in paths)
+                return has_msg and not any(_ADD_BAD.search(p) or p.startswith("-") or _is_dir(p, cwd)
+                                           for p in paths)
             if a in ("-m", "--message"):
                 if i + 1 >= len(args):
                     return False
@@ -463,11 +499,62 @@ def bash_allowed(cmd):
             elif a.startswith("-"):
                 return False
             else:
-                if _ADD_BAD.search(a):
+                if _ADD_BAD.search(a) or _is_dir(a, cwd):
                     return False
                 i += 1
         return has_msg
     return False
+
+
+def transcript_edited(payload, target):
+    """True when this agent's own transcript shows an earlier, successful Edit/Write/MultiEdit/NotebookEdit
+    of `target` (normalised path). The current call (payload tool_use_id) is excluded; tool_use blocks
+    without a non-error tool_result (e.g. an edit this gate denied) do not count."""
+    path, _ = transcript_for(payload, "executer")
+    if not path or not os.path.isfile(path):
+        return False
+    cwd, cur = payload.get("cwd"), payload.get("tool_use_id")
+    cands, ok = set(), set()
+    with open(path, "rb") as fh:
+        for ln in fh:
+            has_use, has_res = b'"tool_use"' in ln, b'"tool_result"' in ln
+            if not (has_use or has_res):
+                continue
+            if has_res and not has_use and not (cands and any(c.encode() in ln for c in cands)):
+                continue
+            try:
+                r = json.loads(ln)
+                content = r["message"]["content"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use" and b.get("name") in EDIT_TOOLS and b.get("id") != cur:
+                    ti = b.get("input")
+                    p = (ti.get("file_path") or ti.get("notebook_path")) if isinstance(ti, dict) else None
+                    if isinstance(p, str) and p and b.get("id") and _norm(p, cwd) == target:
+                        cands.add(b["id"])
+                elif b.get("type") == "tool_result" and b.get("tool_use_id") in cands and not b.get("is_error"):
+                    ok.add(b["tool_use_id"])
+    return bool(ok)
+
+
+def _edit_allowed(payload):
+    """An edit tool call is allowed past the stop size only for a file this agent already changed.
+    State is the fast path; a missing/unreadable/stale state falls back to the agent's own transcript."""
+    t = _touched_path(payload)
+    if not t:
+        return False
+    st = load_state(payload["agent_id"]) or {}
+    if t in (st.get("touched") or []):
+        return True
+    try:
+        return transcript_edited(payload, t)
+    except Exception:
+        return False
 
 
 def executer_gate(payload):
@@ -482,12 +569,13 @@ def executer_gate(payload):
         return None
     tool, ti = payload.get("tool_name"), payload.get("tool_input")
     allowed = False
-    if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-        st = load_state(payload["agent_id"]) or {}
-        t = _touched_path(payload)
-        allowed = bool(t) and t in (st.get("touched") or [])
+    if tool in EDIT_TOOLS:
+        allowed = _edit_allowed(payload)
     elif tool == "Bash":
-        allowed = isinstance(ti, dict) and bash_allowed(ti.get("command"))
+        try:
+            allowed = isinstance(ti, dict) and bash_allowed(ti.get("command"), payload.get("cwd"))
+        except Exception:
+            allowed = False  # a command that does not parse is denied; fail-open is for an unevaluable payload
     if allowed:
         return None
     st = load_state(payload["agent_id"]) or {}
@@ -706,6 +794,7 @@ def selftest():
         return h.get("permissionDecision") == "deny" and h.get("permissionDecisionReason") == DENY_REASON
 
     a_py = os.path.join(tmp, "a.py")
+    os.makedirs(os.path.join(tmp, "adir"), exist_ok=True)
     cases = [
         ("edit touched file allowed", ("Edit", {"file_path": a_py}), False),
         ("edit touched file via relative path allowed", ("MultiEdit", {"file_path": "rel/b.py"}), False),
@@ -715,7 +804,30 @@ def selftest():
         ("serena denied", ("mcp__serena__find_symbol", {"name_path_pattern": "x"}), True),
         ("git status allowed", ("Bash", {"command": "git status"}), False),
         ("git status -sb allowed", ("Bash", {"command": "git status -sb"}), False),
-        ("git diff allowed", ("Bash", {"command": "git diff --stat -- src/a.py"}), False),
+        ("git diff --stat allowed", ("Bash", {"command": "git diff --stat -- src/a.py"}), False),
+        ("git diff --name-only allowed", ("Bash", {"command": "git diff --name-only"}), False),
+        ("git diff --cached --name-status allowed", ("Bash", {"command": "git diff --cached --name-status"}), False),
+        ("git diff --staged --stat allowed", ("Bash", {"command": "git diff --staged --stat"}), False),
+        ("git diff rev --stat allowed", ("Bash", {"command": "git diff HEAD~1 --stat"}), False),
+        ("git diff full patch denied", ("Bash", {"command": "git diff"}), True),
+        ("git diff path-only patch denied", ("Bash", {"command": "git diff -- hooks/meter.py"}), True),
+        ("git diff --cached patch denied", ("Bash", {"command": "git diff --cached"}), True),
+        ("git diff -p --stat denied", ("Bash", {"command": "git diff -p --stat"}), True),
+        ("git diff -U unknown flag denied", ("Bash", {"command": "git diff -U9999 --stat"}), True),
+        ("git diff --stat=N denied", ("Bash", {"command": "git diff --stat=500"}), True),
+        ("git diff glob denied", ("Bash", {"command": "git diff --stat *"}), True),
+        ("git diff ? glob denied", ("Bash", {"command": "git diff --stat -- a?.py"}), True),
+        ("git diff [] glob denied", ("Bash", {"command": "git diff --stat -- a[12].py"}), True),
+        ("git status glob denied", ("Bash", {"command": "git status *"}), True),
+        ("git status unknown flag denied", ("Bash", {"command": "git status --output=x"}), True),
+        ("git status -- path allowed", ("Bash", {"command": "git status -- hooks/meter.py"}), False),
+        ("git log superscript digit denied", ("Bash", {"command": "git log -² --oneline"}), True),
+        ("git log -n superscript digit denied", ("Bash", {"command": "git log -n ²"}), True),
+        ("git add directory denied", ("Bash", {"command": "git add adir"}), True),
+        ("git add -- directory denied", ("Bash", {"command": "git add -- adir"}), True),
+        ("git add file next to directory name allowed", ("Bash", {"command": "git add adir/f.py"}), False),
+        ("git commit positional directory denied", ("Bash", {"command": "git commit -m x adir"}), True),
+        ("git commit pathspec directory denied", ("Bash", {"command": "git commit -m x -- adir"}), True),
         ("git log -1 allowed", ("Bash", {"command": "git log -1"}), False),
         ("git log --oneline -n 5 allowed", ("Bash", {"command": "git log --oneline -n 5"}), False),
         ("git log -3 --oneline allowed", ("Bash", {"command": "git log -3 --oneline"}), False),
@@ -766,11 +878,87 @@ def selftest():
                                               "session_id": sid}, "executer", gate=True) is None)
     d = gate("Read", {"file_path": a_py})["hookSpecificOutput"]["permissionDecisionReason"]
     check("deny reason names the allowed forms exactly", all(x in d for x in (
-        "`git status`", "`git diff`", "`git log -1`", "`git add <explicit paths>`", "`git commit -m '<msg>'`",
-        "separate calls", "no `&&`, `cd`, heredoc, `$()`, `-a`", "SIZE-HANDBACK")), d)
+        "`git status`", "`git diff --stat`", "`--name-only`", "`--name-status`", "`git log -1`",
+        "`git add <explicit file paths>`", "`git commit -m '<msg>'`", "separate calls",
+        "no `&&`, `cd`, heredoc, `$()`, `-a`, globs, directories", "SIZE-HANDBACK")), d)
+
     check("deny logged as L3", any(e["level"] == "L3" for e in events()))
     check("--gate ignores non-PreToolUse events", run({"hook_event_name": "PostToolUse", "agent_id": aid,
                                                        "tool_name": "Read"}, "executer", gate=True) is None)
+
+    # --- L3 gate: parse errors deny; state loss falls back to the agent's own transcript
+    real_ba = bash_allowed
+
+    def boom(*a, **kw):
+        raise ValueError("unparseable")
+
+    globals()["bash_allowed"] = boom
+    try:
+        check("L3 allowlist exception denies the Bash call", denied(gate("Bash", {"command": "git status"})))
+    finally:
+        globals()["bash_allowed"] = real_ba
+    check("L3 allowlist restored after the exception test", not denied(gate("Bash", {"command": "git status"})))
+
+    def tu(i, tool, fp):
+        return {"type": "assistant", "isSidechain": True, "message": {"id": "u" + i, "content": [
+            {"type": "tool_use", "id": i, "name": tool, "input": {"file_path": fp}}]}}
+
+    def tr(i, err=False):
+        r = {"type": "tool_result", "tool_use_id": i, "content": "ok"}
+        if err:
+            r["is_error"] = True
+        return {"type": "user", "message": {"content": [r]}}
+
+    def gate_tr(lines, tool, ti, cur=None, ctx=160000):
+        write(sub, [asst("a", 0, 0, ctx, side=True)] + lines)
+        pl = {"hook_event_name": "PreToolUse", "session_id": sid, "agent_id": aid, "transcript_path": tp,
+              "cwd": tmp, "tool_name": tool, "tool_input": ti, "tool_use_id": cur}
+        return run(pl, "executer", gate=True)
+
+    wipe()  # no state at all: a lost update / unreadable state must not strand an already-edited file
+    done = [tu("t1", "Edit", a_py), tr("t1")]
+    check("L3 no state: edit of a file changed earlier (transcript) allowed",
+          gate_tr(done, "Edit", {"file_path": a_py}, cur="t9") is None)
+    check("L3 no state: relative path matches the transcript's absolute path",
+          gate_tr([tu("t1", "Write", os.path.join(tmp, "rel", "b.py")), tr("t1")], "Edit",
+                  {"file_path": "rel/b.py"}, cur="t9") is None)
+    check("L3 no state: file never edited is denied", denied(gate_tr(done, "Edit", {"file_path": os.path.join(tmp, "n.py")}, cur="t9")))
+    check("L3 no state: only a Read of the file does not count",
+          denied(gate_tr([tu("t1", "Read", a_py), tr("t1")], "Edit", {"file_path": a_py}, cur="t9")))
+    check("L3 no state: the current call's own tool_use does not count",
+          denied(gate_tr([tu("t9", "Edit", a_py)], "Edit", {"file_path": a_py}, cur="t9")))
+    check("L3 no state: an earlier edit without a result (denied) does not count",
+          denied(gate_tr([tu("t1", "Edit", a_py)], "Edit", {"file_path": a_py}, cur="t9")))
+    check("L3 no state: an earlier edit whose result is an error does not count",
+          denied(gate_tr([tu("t1", "Edit", a_py), tr("t1", err=True)], "Edit", {"file_path": a_py}, cur="t9")))
+    save_state(aid, {"calls": 3, "touched": [], "l1": 0, "l2": False})
+    check("L3 state without the path: transcript fallback allows",
+          gate_tr(done, "Edit", {"file_path": a_py}, cur="t9") is None)
+    with open(state_path(aid), "w") as fh:
+        fh.write("{corrupt")
+    check("L3 corrupt state: transcript fallback allows",
+          gate_tr(done, "Edit", {"file_path": a_py}, cur="t9") is None)
+    check("L3 corrupt state: untouched file still denied",
+          denied(gate_tr(done, "Edit", {"file_path": os.path.join(tmp, "n.py")}, cur="t9")))
+
+    # a read that fails once is retried
+    wipe()
+    save_state(aid, {"calls": 7, "touched": [a_py]})
+    real_load, flaky = json.load, [1]
+
+    def flaky_load(fh, *a, **kw):
+        if flaky[0]:
+            flaky[0] = 0
+            raise OSError("transient")
+        return real_load(fh, *a, **kw)
+
+    json.load = flaky_load
+    try:
+        got = load_state(aid)
+    finally:
+        json.load = real_load
+    check("load_state retries a failed read once", got is not None and got.get("calls") == 7, got)
+    check("load_state: missing file -> None without error", load_state("nonexistent-agent") is None)
 
     # --- main ladder
     wipe()

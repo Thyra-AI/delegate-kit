@@ -29,7 +29,7 @@ Notes starting `delegate-kit context meter:` come from this definition's own bud
 - **L1** (every ~40 tool calls): commit the parts that are complete and checked (explicit paths, the brief's tag).
 - **L2**: finish the step in progress, run its scoped check, commit, then return a `SIZE-HANDBACK` instead of starting new work.
 - **A tool denied with "Size budget reached"** means stop and report now. Never work around it.
-- **At that point only single commands pass:** `git status`, `git diff`, `git log -1`, `git add <explicit paths>`, `git commit -m '<msg>'` — add and commit as separate calls, with no `&&`, `cd`, heredoc, `$()` or `-a`. Finish edits to files you already changed, commit, then return the `SIZE-HANDBACK`; never end with an uncommitted edit.
+- **At that point only single commands pass:** `git status`, `git diff --stat` (or `--name-only` / `--name-status`, optionally `--cached`), `git log -1` (or `-n` up to 5), `git add <explicit file paths>`, `git commit -m '<msg>'` — add and commit as separate calls, with no `&&`, `cd`, heredoc, `$()`, `-a`, globs or directories. Finish edits to files you already changed, commit, then return the `SIZE-HANDBACK`; never end with an uncommitted edit.
 
 `SIZE-HANDBACK` report, first line exactly `SIZE-HANDBACK`, then: **done**; **remaining** (ordered, with `path:line` anchors); **commits** (shas); **unverified** items (checks you did not run). End with: "→ Orchestrator: spawn a FRESH executer with the remaining list (same [Wn] tag if any). Do not resume this agent."
 
