@@ -1515,9 +1515,17 @@ def session_of(ag):
     return re.sub(r"\.jsonl$", "", parts[-1]) if parts[-1] else ""
 
 
-def join_rows(bench, plan):
-    """One row per plan cluster that has tagged agents in this bench JSON. A cluster with several
-    agents is represented by its highest-peak agent (peak and tool calls from the same agent)."""
+MISS_NONE, MISS_MAIN, MISS_EMPTY = 0, 1, 2
+MISS_TEXT = {MISS_NONE: "no agent in the bench carries its tag",
+             MISS_MAIN: "only the main agent carries its tag (workers are not joined)",
+             MISS_EMPTY: "tagged agent has no peak_context or tool_calls (<= 0)"}
+
+
+def join_report(bench, plan):
+    """(rows, misses, unknown). rows: one per plan cluster that has tagged agents in this bench JSON; a
+    cluster with several agents is represented by its highest-peak agent (peak and tool calls from the same
+    agent). misses: {cluster id: MISS_* code} for the other clusters. unknown: [(tag or None, description)] of
+    worker agents whose tag matches no cluster."""
     tag_cluster = {}
     for c in plan.get("clusters") or []:
         for w in c.get("wus") or []:
@@ -1525,22 +1533,36 @@ def join_rows(bench, plan):
         t = (c.get("commit_tag") or "").strip("[]")
         if t:
             tag_cluster[t] = c
-    best = {}
+    best, miss, unknown = {}, {}, []
     for ag in bench.get("agents") or []:
+        tag = tag_of(ag.get("description"))
+        c = tag_cluster.get(tag)
         if ag.get("type") == "main":
+            if c is not None:
+                miss[c["id"]] = max(miss.get(c["id"], MISS_NONE), MISS_MAIN)
             continue
-        c = tag_cluster.get(tag_of(ag.get("description")))
         peak, calls = ag.get("peak_context") or 0, ag.get("tool_calls") or 0
-        if c is None or peak <= 0 or calls <= 0:
-            continue
-        if c["id"] not in best or peak > best[c["id"]][1]["peak_context"]:
+        if c is None:
+            unknown.append((tag, str(ag.get("description") or "")))
+        elif peak <= 0 or calls <= 0:
+            miss[c["id"]] = MISS_EMPTY
+        elif c["id"] not in best or peak > best[c["id"]][1]["peak_context"]:
             best[c["id"]] = (c, ag)
     share = ((plan.get("params") or {}).get("output_in_peak"))
     share = DEFAULTS["output_in_peak"] if share is None else share
-    return [{"cluster": c["id"], "tag": tag_of(ag["description"]), "peak": ag["peak_context"],
+    rows = [{"cluster": c["id"], "tag": tag_of(ag["description"]), "peak": ag["peak_context"],
              "tool_calls": ag["tool_calls"], "est_peak": c.get("est_tokens"), "est_hops": c.get("est_hops"),
              "out_peak": share * (c.get("est_output") or 0), "session": session_of(ag)}
             for c, ag in best.values()]
+    misses = {}
+    for c in plan.get("clusters") or []:
+        if c["id"] not in best:
+            misses[c["id"]] = miss.get(c["id"], MISS_NONE)
+    return rows, misses, unknown
+
+
+def join_rows(bench, plan):
+    return join_report(bench, plan)[0]
 
 
 def fit_line(rows):
@@ -1568,13 +1590,41 @@ def cmd_calibrate(a):
     plans = [read_object(p, "plan") for p in a.plan]
     if len(plans) not in (1, len(benches)):
         die("give one --plan for all benches, or one per --bench (got %d plans, %d benches)" % (len(plans), len(benches)))
-    rows = []
+    rows, seen, dups = [], set(), 0
+    plan_misses = {}  # plan index -> {cluster id: MISS_* code}; `joined` holds clusters some bench did join (not misses)
+    unknown, joined = [], {}
     for i, b in enumerate(benches):
-        rows += join_rows(b, plans[0] if len(plans) == 1 else plans[i])
+        pi = 0 if len(plans) == 1 else i
+        got, misses, unk = join_report(b, plans[pi])
+        for r in got:
+            r["source"] = "%s#%d" % (os.path.basename(a.bench[i]), i + 1)
+            # the same spawn in two bench files (forked or overlapping runs) must count once
+            key = (r["tag"], r["peak"], r["tool_calls"])
+            if key in seen:
+                dups += 1
+                continue
+            seen.add(key)
+            rows.append(r)
+        pm = plan_misses.setdefault(pi, {})
+        for cid, code in misses.items():
+            pm[cid] = max(pm.get(cid, MISS_NONE), code)
+        joined.setdefault(pi, set()).update(r["cluster"] for r in got)
+        unknown += [(a.bench[i], t, d) for t, d in unk]
     out = a.out or calibration_path()
     prev = dict((k, DEFAULTS[k]) for k in CALIB_KEYS)
     prev.update(load_calibration(out)[0])
-    print("calibrate: %d joined row(s) from %d bench file(s)" % (len(rows), len(benches)))
+    print("calibrate: %d joined row(s) from %d bench file(s), %d plan file(s)" % (len(rows), len(benches), len(plans)))
+    if dups:
+        print("  dropped %d duplicate row(s) (same tag, peak and tool calls in more than one bench file)" % dups)
+    multi = len(plans) > 1
+    for pi in sorted(plan_misses):
+        for c in plans[pi].get("clusters") or []:
+            code = plan_misses[pi].get(c["id"], MISS_NONE)
+            if c["id"] not in joined.get(pi, ()):
+                tags = ",".join((c.get("wus") or []) or [(c.get("commit_tag") or "").strip("[]")])
+                print("  unjoined: %s%s [%s]: %s" % (os.path.basename(a.plan[pi]) + ":" if multi else "", c["id"], tags, MISS_TEXT[code]))
+    for src, t, d in unknown:
+        print("  unmatched agent in %s: %s" % (os.path.basename(src), ("tag %s" % t) if t else "no [tag] in description: %s" % d[:40]))
     fit = fit_line(rows) if len(rows) >= CALIB_MIN_ROWS else None
     if fit is None:
         why = ("need >= %d rows" % CALIB_MIN_ROWS) if len(rows) < CALIB_MIN_ROWS else "tool call counts do not vary"
@@ -1591,9 +1641,9 @@ def cmd_calibrate(a):
     e_old = fit_error(rows, prev["overhead"], prev["hop_tokens"])
     e_new = fit_error(rows, ovh, hop)
     print("%-10s %-9s %-9s %-9s %s" % ("cluster", "est_peak", "actual", "fit_peak", "calls est/act"))
-    for r in sorted(rows, key=lambda r: nat_key(r["cluster"])):
+    for r in sorted(rows, key=lambda r: (r["source"], nat_key(r["cluster"]))):
         print("%-10s %-9s %-9s %-9s %s/%d" % (
-            "%s %s" % (r["cluster"], r["tag"]), fmt_k(r["est_peak"]) if r["est_peak"] else "-",
+            "%s %s%s" % (r["cluster"], r["tag"], " @" + r["source"] if len(benches) > 1 else ""), fmt_k(r["est_peak"]) if r["est_peak"] else "-",
             fmt_k(r["peak"]), fmt_k(r["fit_peak"]), r["est_hops"] if r["est_hops"] is not None else "-", r["tool_calls"]))
     for k in CALIB_KEYS:
         print("%-10s %6d -> %-6d%s" % (k, prev[k], new[k], "  (clamped to %s..%s)" % CALIB_BOUNDS[k] if k in clamped else ""))
@@ -1604,7 +1654,7 @@ def cmd_calibrate(a):
                      "rmse": round(e_new[0]), "mean_abs_pct": round(100 * e_new[1], 1),
                      "sessions": sorted(set(r["session"] for r in rows if r["session"])),
                      "overhead": ovh, "hop_tokens": hop, "previous": prev, "clamped": clamped,
-                     "data": [{k: r[k] for k in ("cluster", "tag", "session", "peak", "tool_calls", "est_peak", "est_hops")}
+                     "data": [{k: r[k] for k in ("cluster", "tag", "source", "session", "peak", "tool_calls", "est_peak", "est_hops")}
                               for r in rows]})
     print("-> %s" % posix(out))
 
@@ -1845,6 +1895,73 @@ def selftest():
     eq("load_calibration returns constants + provenance", loaded,
        ({"overhead": 40000, "hop_tokens": 1000}, {"n": CALIB_MIN_ROWS, "date": time.strftime("%Y-%m-%d")}))
 
+    # calibrate with several --bench / --plan files: pooled guard, unjoined report, per-file provenance
+    def mk_clusters(ids):
+        return [{"id": "C%d" % i, "wus": ["W%d" % i], "commit_tag": "[W%d]" % i, "est_tokens": 60000,
+                 "est_hops": 20, "est_output": 0} for i in ids]
+
+    def mk_agents(ids, base=40000, sess="s", **kw):
+        return [dict({"description": "[W%d] x" % i, "peak_context": base + 1000 * (4 + i), "tool_calls": 4 + i,
+                      "file": "/x/projects/p/%s/subagents/agent-%d.jsonl" % (sess, i)}, **kw) for i in ids]
+
+    def multi_case(benches, plans, argv_style="ns"):
+        with tempfile.TemporaryDirectory() as d:
+            bp, pp = [], []
+            for i, o in enumerate(benches):
+                bp.append(os.path.join(d, "bench%d.json" % i))
+                write_json(bp[-1], {"agents": o})
+            for i, o in enumerate(plans):
+                pp.append(os.path.join(d, "plan%d.json" % i))
+                write_json(pp[-1], {"clusters": o})
+            out = os.path.join(d, "calibration.json")
+            buf, err = io.StringIO(), io.StringIO()
+            code = 0
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                try:
+                    if argv_style == "flags":  # repeated flags through the real parser
+                        argv = ["calibrate", "--out", out]
+                        for x in bp:
+                            argv += ["--bench", x]
+                        for x in pp:
+                            argv += ["--plan", x]
+                        main(argv)
+                    else:
+                        cmd_calibrate(argparse.Namespace(bench=bp, plan=pp, out=out))
+                except SystemExit as e:
+                    code = e.code
+            return (read_json(out, "calibration") if os.path.isfile(out) else None), buf.getvalue(), code
+
+    # two bench + two plan files with colliding cluster ids C1..C6: 12 rows, nothing deduped across files
+    got, text, _ = multi_case([mk_agents(range(1, 7), sess="sa"), mk_agents(range(1, 7), base=41000, sess="sb")],
+                              [mk_clusters(range(1, 7)), mk_clusters(range(1, 7))])
+    eq("calibrate pools two bench+plan pairs", (got["n_rows"], got["sessions"], len(set(r["source"] for r in got["data"]))),
+       (12, ["sa", "sb"], 2))
+    eq("calibrate sources keep colliding cluster ids apart", sorted(r["source"] for r in got["data"] if r["cluster"] == "C1"),
+       ["bench0.json#1", "bench1.json#2"])
+    # repeated flags go through the real parser
+    got, _, _ = multi_case([mk_agents(range(1, 7), sess="sa"), mk_agents(range(1, 7), base=41000, sess="sb")],
+                           [mk_clusters(range(1, 7)), mk_clusters(range(1, 7))], "flags")
+    eq("calibrate repeated --bench/--plan flags", got and got["n_rows"], 12)
+    # one plan for two benches, each bench covering half of it: pooled to the minimum, nothing unjoined
+    got, text, _ = multi_case([mk_agents(range(1, 6), sess="sa"), mk_agents(range(6, 11), sess="sb")],
+                              [mk_clusters(range(1, 11))])
+    eq("calibrate one plan for two benches", (got["n_rows"], "unjoined" in text), (CALIB_MIN_ROWS, False))
+    # the same spawn present in two bench files counts once; 9 distinct rows stay below the guard
+    got, text, _ = multi_case([mk_agents(range(1, 10)), mk_agents(range(1, 10))], [mk_clusters(range(1, 10))])
+    eq("calibrate drops duplicate spawns", (got, "dropped 9 duplicate" in text, "nothing changed" in text), (None, True, True))
+    # plan/bench count mismatch is refused
+    got, text, code = multi_case([mk_agents([1]), mk_agents([2]), mk_agents([3])], [mk_clusters([1]), mk_clusters([2])])
+    eq("calibrate refuses 3 benches for 2 plans", (got, code), (None, 2))
+    # unjoined report: every plan piece without a row says why, and unknown tags are listed
+    agents = mk_agents(range(1, 10)) + mk_agents([10], peak_context=0) + mk_agents([11], type="main")         + [{"description": "[W99] stray", "peak_context": 50000, "tool_calls": 5}, {"description": "untagged", "peak_context": 1, "tool_calls": 1}]
+    got, text, _ = multi_case([agents], [mk_clusters(range(1, 13))])
+    eq("calibrate reports unjoined pieces with reasons",
+       (got, [l for l in text.splitlines() if l.startswith("  unjoined")]),
+       (None, ["  unjoined: C10 [W10]: " + MISS_TEXT[MISS_EMPTY], "  unjoined: C11 [W11]: " + MISS_TEXT[MISS_MAIN],
+               "  unjoined: C12 [W12]: " + MISS_TEXT[MISS_NONE]]))
+    eq("calibrate reports unmatched agents", [l for l in text.splitlines() if l.startswith("  unmatched")],
+       ["  unmatched agent in bench0.json: tag W99", "  unmatched agent in bench0.json: no [tag] in description: untagged"])
+
     # ere_compatible(): Python-only syntax must not reach `git grep -E`
     for pat, want in (
         ("foo", True), ("foo_bar\\.baz", True), ("a|b", True), ("foo(bar)+", True),
@@ -1913,8 +2030,10 @@ def main(argv=None):
     p.add_argument("--write", action="store_true", help="store recomputed estimates/warnings back into the plan")
     p.set_defaults(fn=cmd_check)
     p = sub.add_parser("calibrate", help="refit overhead/hop_tokens from `bench --json` output joined to plan(s)")
-    p.add_argument("--bench", nargs="+", required=True, help="bench.json file(s) from `bench PATH --json`")
-    p.add_argument("--plan", nargs="+", required=True, help="partition.json file(s) (one for all benches, or one per bench)")
+    p.add_argument("--bench", nargs="+", action="extend", required=True,
+                   help="bench.json file(s) from `bench PATH --json` (repeatable)")
+    p.add_argument("--plan", nargs="+", action="extend", required=True,
+                   help="partition.json file(s), repeatable (one for all benches, or one per bench)")
     p.add_argument("--out", default="", help="default: <config>/delegate-kit/calibration.json")
     p.set_defaults(fn=cmd_calibrate)
     p = sub.add_parser("show", help="compact view of one cluster (what a subagent reads)")
