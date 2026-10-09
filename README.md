@@ -327,7 +327,7 @@ The fix is to scope and size the work at planning time. The sizing target is **a
 |---|---|---|
 | L1 | every 40 tool calls | nudge: commit the parts that are complete and checked |
 | L2 | 60 calls or 120k context | nudge: finish the step, run the scoped check, commit, return a `SIZE-HANDBACK` |
-| L3 | 150k context | context-growing tools are denied ("Size budget reached"); only edits to files it already touched and `git status/diff/add/commit` remain |
+| L3 | 150k context | context-growing tools are denied ("Size budget reached"); only edits to files it already touched and single `git status/diff/log -1/add/commit` commands remain (no `&&`, `cd`, heredoc, `$()`, `-a`) |
 | backstop | `maxTurns: 150` | native stop; the parent gets no report, so read `git log` |
 
 A `SIZE-HANDBACK` report (done / remaining with `path:line` anchors / commits / unverified) tells the orchestrator to spawn a **fresh** executer with the remaining list under the same `[Wn]` tag, never to resume the old one. Thresholds and the kill switch live in `~/.claude/delegate-kit/config.json`, written once by `/delegate-kit:setup` and never overwritten: `meter.executer.{enabled, commit_every_calls, wrapup_calls, wrapup_tokens, stop_tokens}` (defaults 40, 60, 120000, 150000). Set `"meter": {"executer": {"enabled": false}}` to turn the nudges and the L3 gate off; `maxTurns` stays.
@@ -483,9 +483,10 @@ Its tests: `python hooks/git_guard.py --selftest`.
 
 **The card and the main context meter (`hooks/card.py`, `hooks/meter.py`).** Three more hooks run in your
 own session, all through the `dk hook` launcher that `/delegate-kit:setup` installs (they do nothing until
-you have run setup, and they fail open: an error prints nothing and never blocks a tool call).
+you have run setup, and they fail open: an error prints nothing and never blocks a tool call). **After
+upgrading the plugin, rerun `/delegate-kit:setup`**; until then the new hooks are silent no-ops.
 
-- **The card.** On `SessionStart` (`startup`, `resume`, `clear`, `compact`) the plugin adds
+- **The card.** On `SessionStart` (`startup`, `clear`, `compact`; not `resume`, whose transcript already holds the card) the plugin adds
   [`hooks/card.md`](hooks/card.md) to the main agent's context: under 250 tokens (about 190) of delegation rules the agent
   descriptions can't carry (chunks of 5 or fewer calls inline, executer briefs of about 30 calls, fresh
   executer on `SIZE-HANDBACK`, push from the main session in the background and don't poll, meter notes are

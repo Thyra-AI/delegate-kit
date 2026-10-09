@@ -177,7 +177,7 @@ You don't have to estimate your own context size: a plugin hook (the context met
 - **About 200k:** your own calls now cost 2-3x a worker's. Delegate any chunk of more than 5 tool calls; a single read, edit or test run stays inline.
 - **About 300k:** write a short state summary under `.delegate-kit/` — decisions, open work, schedule path, `base_sha` — and **offer the user** `/compact` or a fresh session (or to hand the remaining objective to the **director**). Don't do it unilaterally. A short repeat arrives every further 150k.
 
-The thresholds and a kill switch (`meter.main.enabled`) live in `~/.claude/delegate-kit/config.json`. If no note ever arrives (setup not run, or the meter switched off), fall back to the user's `/context` showing over 200k, or about 15 or more agent hand-backs in one session.
+After upgrading the plugin, rerun `/delegate-kit:setup`; until then the new hooks are silent no-ops. The thresholds and a kill switch (`meter.main.enabled`) live in `~/.claude/delegate-kit/config.json`. If no note ever arrives (setup not run, or the meter switched off), fall back to the user's `/context` showing over 200k, or about 15 or more agent hand-backs in one session.
 
 ### Spawn fresh by default; resume sparingly
 

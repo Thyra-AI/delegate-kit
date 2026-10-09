@@ -36,10 +36,14 @@ Two properties matter enough to guard:
 
 8. **The card and the main meter are wired.** `hooks/card.md` is at most 250 tokens (estimated as
    ceil(characters / 3.5), deliberately pessimistic: English prose runs 3.5-4 characters per token and
-   there is no tokenizer in the stdlib); `hooks/hooks.json` has SessionStart (`startup|resume|clear|compact`),
+   there is no tokenizer in the stdlib); `hooks/hooks.json` has SessionStart (`startup|clear|compact`),
    UserPromptSubmit and PostToolUse (`Agent|Task`) entries that run through the installed `dk hook`
    launcher (never the slow `python3 ... || python` form); the launcher's `hook` subcommand runs the
    card end to end from the exact hooks.json command, and is a silent no-op when setup has not run.
+   Every new hook command is fail-open: no `exec`, ends in `|| exit 0`, and exits 0 even when the
+   installed launcher is stale (a launcher that exits 2, as an older `dk` without `hook` does: a
+   UserPromptSubmit hook exiting 2 would erase the user's prompt). With CLAUDE_CONFIG_DIR unset, the
+   launcher's `hook` branch puts state next to the launcher, not under the user's home.
 """
 import json
 import math
@@ -158,7 +162,7 @@ def check_card_and_main_hooks():
         if n > CARD_MAX_TOKENS:
             failures.append("hooks/card.md is ~%d tokens (ceil(chars/%s)), limit %d" % (n, CHARS_PER_TOKEN, CARD_MAX_TOKENS))
     for ev, want_matcher, needle in (
-        ("SessionStart", "startup|resume|clear|compact", "hook card"),
+        ("SessionStart", "startup|clear|compact", "hook card"),
         ("UserPromptSubmit", None, "hook meter --role main"),
         ("PostToolUse", "Agent|Task", "hook meter --role main"),
     ):
@@ -175,6 +179,8 @@ def check_card_and_main_hooks():
             failures.append("hooks.json %s must route through the dk launcher, not python directly: %s" % (ev, cmd))
         if "${" in cmd:
             failures.append("hooks.json %s command contains `${`: %s" % (ev, cmd))
+        if re.search(r"\bexec\b", cmd) or not cmd.rstrip().endswith("|| exit 0"):
+            failures.append("hooks.json %s command is not fail-open (no `exec`, must end in `|| exit 0`): %s" % (ev, cmd))
     pre = hook_commands("PreToolUse")
     if [m for m, _ in pre] != ["Bash"] or "hooks/git_guard.py" not in pre[0][1]:
         failures.append("hooks.json PreToolUse should be exactly the Bash git_guard entry")
@@ -207,6 +213,31 @@ def check_hook_launcher(home, dk):
     if r.returncode != 0 or r.stdout.strip():
         failures.append("hooks.json UserPromptSubmit command should be a silent no-op without a transcript (rc %d): %s"
                         % (r.returncode, (r.stdout + r.stderr).strip()[:300]))
+    with tempfile.TemporaryDirectory() as stale:  # a stale launcher (older dk, no `hook`) exits 2: still exit 0
+        fake = Path(stale) / "delegate-kit" / "bin" / "dk"
+        fake.parent.mkdir(parents=True)
+        fake.write_text("#!/bin/sh\necho dk: unknown command hook >&2\nexit 2\n", encoding="utf-8", newline="\n")
+        for ev, entries in cmds.items():
+            r = run(entries[0][1], dict(os.environ, CLAUDE_CONFIG_DIR=stale), payload)
+            if r.returncode != 0 or r.stdout:
+                failures.append("hooks.json %s command must exit 0 with a stale launcher that exits 2 (rc %d): %s"
+                                % (ev, r.returncode, (r.stdout + r.stderr).strip()[:300]))
+    with tempfile.TemporaryDirectory() as bare:  # CLAUDE_CONFIG_DIR unset: state lands next to the launcher
+        shutil.copytree(home / "delegate-kit", Path(bare) / "delegate-kit")
+        (Path(bare) / "delegate-kit" / "config.json").unlink(missing_ok=True)  # defaults: the main meter is on
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+        env.update(HOME=bare + "-home", USERPROFILE=bare + "-home")
+        compact = json.dumps({"hook_event_name": "SessionStart", "source": "compact", "session_id": "d2chk"})
+        r = subprocess.run([sh, (Path(bare) / "delegate-kit" / "bin" / "dk").as_posix(), "hook", "meter", "--role", "main"],
+                           input=compact, capture_output=True, text=True, env=env)
+        if r.returncode != 0 or not (Path(bare) / "delegate-kit" / "state" / "main-d2chk.json").is_file():
+            failures.append("dk hook with CLAUDE_CONFIG_DIR unset should keep state beside the launcher (rc %d): %s"
+                            % (r.returncode, (r.stdout + r.stderr).strip()[:300]))
+        for junk in ("bogus", "card"):  # unknown hook name / hook script crash path: still exit 0
+            r = subprocess.run([sh, (Path(bare) / "delegate-kit" / "bin" / "dk").as_posix(), "hook", junk],
+                               input="not json", capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                failures.append("dk hook %s must exit 0 (rc %d)" % (junk, r.returncode))
     with tempfile.TemporaryDirectory() as empty:  # setup never ran: fail-open, no output, exit 0
         for cmd in (card_cmd, meter_cmd):
             r = run(cmd, dict(os.environ, CLAUDE_CONFIG_DIR=empty), payload)

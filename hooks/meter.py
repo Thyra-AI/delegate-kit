@@ -39,8 +39,10 @@ DEFAULTS = {
 }
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-DENY_REASON = ("Size budget reached: finish edits to files you already changed, commit (mark unverified "
-               "if checks didn't run), return SIZE-HANDBACK now.")
+DENY_REASON = ("Size budget reached: only single commands are allowed now - `git status`, `git diff`, "
+               "`git log -1`, `git add <explicit paths>`, `git commit -m '<msg>'` (run add and commit as separate "
+               "calls; no `&&`, `cd`, heredoc, `$()`, `-a`). Finish edits to files you already changed, commit, "
+               "then return SIZE-HANDBACK.")
 
 
 # ------------------------------------------------------------------ paths, config, state
@@ -401,8 +403,35 @@ def split_simple(cmd):
     return toks
 
 
+_LOG_FORMATS = ("--oneline", "--stat", "--name-only", "--name-status", "--no-color")
+
+
+def _log_ok(args):
+    """`git log -1 [fmt]` or `git log [--oneline] -n <=5` (also `-<n>`, `-n<n>`, `--max-count=<n>`)."""
+    n, i = None, 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-n", "--max-count") and i + 1 < len(args):
+            v, i = args[i + 1], i + 2
+        elif a.startswith("--max-count="):
+            v, i = a[12:], i + 1
+        elif a.startswith("-n") and len(a) > 2:
+            v, i = a[2:], i + 1
+        elif len(a) > 1 and a[0] == "-" and a[1:].isdigit():
+            v, i = a[1:], i + 1
+        elif a in _LOG_FORMATS:
+            i += 1
+            continue
+        else:
+            return False
+        if not v.isdigit() or not 1 <= int(v) <= 5 or n is not None:
+            return False
+        n = int(v)
+    return n is not None
+
+
 def bash_allowed(cmd):
-    """True only for `git status|diff|add <explicit paths>|commit` as ONE simple command."""
+    """True only for `git status|diff|log -1|add <explicit paths>|commit` as ONE simple command."""
     toks = split_simple(cmd) if isinstance(cmd, str) else None
     if not toks or len(toks) < 2 or toks[0] != "git":
         return False
@@ -411,6 +440,8 @@ def bash_allowed(cmd):
         return True
     if sub == "diff":
         return not any(a == b or a.startswith(b + "=") for a in args for b in _DIFF_BAD)
+    if sub == "log":
+        return _log_ok(args)
     if sub == "add":
         paths = [a for a in args if a != "--"]
         return bool(paths) and not any(a.startswith("-") or _ADD_BAD.search(a) for a in paths)
@@ -685,6 +716,16 @@ def selftest():
         ("git status allowed", ("Bash", {"command": "git status"}), False),
         ("git status -sb allowed", ("Bash", {"command": "git status -sb"}), False),
         ("git diff allowed", ("Bash", {"command": "git diff --stat -- src/a.py"}), False),
+        ("git log -1 allowed", ("Bash", {"command": "git log -1"}), False),
+        ("git log --oneline -n 5 allowed", ("Bash", {"command": "git log --oneline -n 5"}), False),
+        ("git log -3 --oneline allowed", ("Bash", {"command": "git log -3 --oneline"}), False),
+        ("git log -n 6 denied", ("Bash", {"command": "git log --oneline -n 6"}), True),
+        ("git log unbounded denied", ("Bash", {"command": "git log"}), True),
+        ("git log --oneline unbounded denied", ("Bash", {"command": "git log --oneline"}), True),
+        ("git log -p denied", ("Bash", {"command": "git log -1 -p"}), True),
+        ("git log --output denied", ("Bash", {"command": "git log -1 --output=x.txt"}), True),
+        ("git log path arg denied", ("Bash", {"command": "git log -1 -- a.py"}), True),
+        ("git log -n 0 denied", ("Bash", {"command": "git log -n 0"}), True),
         ("git diff --output denied", ("Bash", {"command": "git diff --output=x.txt"}), True),
         ("git add explicit paths allowed", ("Bash", {"command": "git add hooks/meter.py bin/check.py"}), False),
         ("git add -- path allowed", ("Bash", {"command": "git add -- hooks/meter.py"}), False),
@@ -703,6 +744,7 @@ def selftest():
         ("git commit --amend denied", ("Bash", {"command": 'git commit --amend -m "x"'}), True),
         ("git commit --no-verify denied", ("Bash", {"command": 'git commit --no-verify -m "x"'}), True),
         ("git commit subst denied", ("Bash", {"command": 'git commit -m "$(cat f)"'}), True),
+        ("cd && add && heredoc commit denied", ("Bash", {"command": 'cd /x && git add f && git commit -m "$(cat <<EOF\nmsg\nEOF\n)" -- f'}), True),
         ("chained && denied", ("Bash", {"command": "git add a.py && git commit -m x"}), True),
         ("chained ; denied", ("Bash", {"command": "git status; ls"}), True),
         ("pipe denied", ("Bash", {"command": "git diff | head"}), True),
@@ -722,6 +764,10 @@ def selftest():
     check("unknown context: not gated", run({"hook_event_name": "PreToolUse", "agent_id": aid, "tool_name": "Read",
                                               "transcript_path": os.path.join(tmp, "nope", "x.jsonl"),
                                               "session_id": sid}, "executer", gate=True) is None)
+    d = gate("Read", {"file_path": a_py})["hookSpecificOutput"]["permissionDecisionReason"]
+    check("deny reason names the allowed forms exactly", all(x in d for x in (
+        "`git status`", "`git diff`", "`git log -1`", "`git add <explicit paths>`", "`git commit -m '<msg>'`",
+        "separate calls", "no `&&`, `cd`, heredoc, `$()`, `-a`", "SIZE-HANDBACK")), d)
     check("deny logged as L3", any(e["level"] == "L3" for e in events()))
     check("--gate ignores non-PreToolUse events", run({"hook_event_name": "PostToolUse", "agent_id": aid,
                                                        "tool_name": "Read"}, "executer", gate=True) is None)

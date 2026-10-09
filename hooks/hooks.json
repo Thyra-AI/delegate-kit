@@ -2,11 +2,11 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear|compact",
+        "matcher": "startup|clear|compact",
         "hooks": [
           {
             "type": "command",
-            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; exec sh \"$D/delegate-kit/bin/dk\" hook card"
+            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; sh \"$D/delegate-kit/bin/dk\" hook card 2>/dev/null || exit 0"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; exec sh \"$D/delegate-kit/bin/dk\" hook meter --role main"
+            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; sh \"$D/delegate-kit/bin/dk\" hook meter --role main 2>/dev/null || exit 0"
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; exec sh \"$D/delegate-kit/bin/dk\" hook meter --role main"
+            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; sh \"$D/delegate-kit/bin/dk\" hook meter --role main 2>/dev/null || exit 0"
           }
         ]
       }
