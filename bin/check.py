@@ -33,8 +33,17 @@ Two properties matter enough to guard:
 
 7. **The git guard is wired.** `hooks/git_guard.py --selftest` passes, and
    `hooks/hooks.json` parses and points at a `hooks/git_guard.py` that exists.
+
+8. **The card and the main meter are wired.** `hooks/card.md` is at most 250 tokens (estimated as
+   ceil(characters / 3.5), deliberately pessimistic: English prose runs 3.5-4 characters per token and
+   there is no tokenizer in the stdlib); `hooks/hooks.json` has SessionStart (`startup|resume|clear|compact`),
+   UserPromptSubmit and PostToolUse (`Agent|Task`) entries that run through the installed `dk hook`
+   launcher (never the slow `python3 ... || python` form); the launcher's `hook` subcommand runs the
+   card end to end from the exact hooks.json command, and is a silent no-op when setup has not run.
 """
 import json
+import math
+import os
 import re
 import shutil
 import subprocess
@@ -122,6 +131,90 @@ def check_executer_budget(home):
             failures.append("executer hook meter path is wrong or missing: %s (want %s)" % (m.group(2), meter))
 
 
+CARD_MAX_TOKENS = 250
+CHARS_PER_TOKEN = 3.5
+
+
+def card_tokens(text):
+    return math.ceil(len(text) / CHARS_PER_TOKEN)
+
+
+def hook_commands(event):
+    """-> [(matcher or None, command)] for one event of hooks/hooks.json ([] if absent or unparsable)."""
+    try:
+        doc = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        return [(e.get("matcher"), h.get("command", "")) for e in doc["hooks"].get(event, [])
+                for h in e.get("hooks", [])]
+    except (OSError, ValueError, AttributeError, KeyError):
+        return []
+
+
+def check_card_and_main_hooks():
+    card = ROOT / "hooks" / "card.md"
+    if not card.is_file():
+        failures.append("hooks/card.md is missing")
+    else:
+        n = card_tokens(card.read_text(encoding="utf-8").strip())
+        if n > CARD_MAX_TOKENS:
+            failures.append("hooks/card.md is ~%d tokens (ceil(chars/%s)), limit %d" % (n, CHARS_PER_TOKEN, CARD_MAX_TOKENS))
+    for ev, want_matcher, needle in (
+        ("SessionStart", "startup|resume|clear|compact", "hook card"),
+        ("UserPromptSubmit", None, "hook meter --role main"),
+        ("PostToolUse", "Agent|Task", "hook meter --role main"),
+    ):
+        got = hook_commands(ev)
+        if len(got) != 1:
+            failures.append("hooks.json %s has %d entries, expected 1" % (ev, len(got)))
+            continue
+        matcher, cmd = got[0]
+        if matcher != want_matcher:
+            failures.append("hooks.json %s matcher is %r, expected %r" % (ev, matcher, want_matcher))
+        if needle not in cmd or "delegate-kit/bin/dk" not in cmd:
+            failures.append("hooks.json %s should run `dk %s`: %s" % (ev, needle, cmd))
+        if "python" in cmd:
+            failures.append("hooks.json %s must route through the dk launcher, not python directly: %s" % (ev, cmd))
+        if "${" in cmd:
+            failures.append("hooks.json %s command contains `${`: %s" % (ev, cmd))
+    pre = hook_commands("PreToolUse")
+    if [m for m, _ in pre] != ["Bash"] or "hooks/git_guard.py" not in pre[0][1]:
+        failures.append("hooks.json PreToolUse should be exactly the Bash git_guard entry")
+
+
+def check_hook_launcher(home, dk):
+    """Run the exact hooks.json commands against the throwaway home (and against an empty one)."""
+    sh = shutil.which("sh")
+    if not sh:
+        return
+    cmds = {ev: hook_commands(ev) for ev in ("SessionStart", "UserPromptSubmit", "PostToolUse")}
+    if not all(cmds.values()):
+        return  # already reported
+    card_cmd, meter_cmd = cmds["SessionStart"][0][1], cmds["UserPromptSubmit"][0][1]
+    payload = json.dumps({"hook_event_name": "SessionStart", "source": "startup", "session_id": "chk"})
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(home))
+
+    def run(cmd, env, stdin):
+        return subprocess.run([sh, "-c", cmd], input=stdin, capture_output=True, text=True, env=env)
+
+    r = run(card_cmd, env, payload)
+    try:
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]
+        ok = ctx["hookEventName"] == "SessionStart" and ctx["additionalContext"] == (ROOT / "hooks" / "card.md").read_text(encoding="utf-8").strip()
+    except (ValueError, KeyError, TypeError):
+        ok = False
+    if r.returncode != 0 or not ok:
+        failures.append("hooks.json SessionStart command did not emit the card (rc %d): %s" % (r.returncode, (r.stdout + r.stderr).strip()[:300]))
+    r = run(meter_cmd, env, json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "chk"}))
+    if r.returncode != 0 or r.stdout.strip():
+        failures.append("hooks.json UserPromptSubmit command should be a silent no-op without a transcript (rc %d): %s"
+                        % (r.returncode, (r.stdout + r.stderr).strip()[:300]))
+    with tempfile.TemporaryDirectory() as empty:  # setup never ran: fail-open, no output, exit 0
+        for cmd in (card_cmd, meter_cmd):
+            r = run(cmd, dict(os.environ, CLAUDE_CONFIG_DIR=empty), payload)
+            if r.returncode != 0 or r.stdout or r.stderr:
+                failures.append("hook command is not a silent no-op before setup (rc %d): %s"
+                                % (r.returncode, (r.stdout + r.stderr).strip()[:300]))
+
+
 def check_install():
     """Compose into a throwaway --home and exercise what lands there."""
     with tempfile.TemporaryDirectory() as home:
@@ -142,6 +235,12 @@ def check_install():
         elif meter_got.read_bytes() != meter_src.read_bytes():
             failures.append("installed meter.py differs from hooks/meter.py")
         check_executer_budget(Path(home))
+        for name in ("card.py", "card.md"):
+            src, got = ROOT / "hooks" / name, dest / name
+            if not got.is_file():
+                failures.append("compose did not install %s" % name)
+            elif got.read_bytes() != src.read_bytes():
+                failures.append("installed %s differs from hooks/%s" % (name, name))
         cfg = Path(home) / "delegate-kit" / "config.json"
         try:
             defaults = json.loads(cfg.read_text(encoding="utf-8"))
@@ -169,6 +268,7 @@ def check_install():
         if r.returncode != 0:
             failures.append("`sh dk partition --help` exited %d:\n%s"
                             % (r.returncode, (r.stderr or r.stdout).strip()))
+        check_hook_launcher(Path(home), dk)
 
 
 def check_scripts_and_guard():
@@ -197,6 +297,13 @@ def check_scripts_and_guard():
         r = run_py(meter, "--selftest")
         if r.returncode != 0:
             failures.append("meter.py --selftest failed:\n%s" % (r.stdout + r.stderr).strip())
+    card = ROOT / "hooks" / "card.py"
+    if not card.is_file():
+        failures.append("hooks/card.py is missing")
+    else:
+        r = run_py(card, "--selftest")
+        if r.returncode != 0:
+            failures.append("card.py --selftest failed:" + chr(10) + "%s" % (r.stdout + r.stderr).strip())
     manifest = ROOT / "hooks" / "hooks.json"
     try:
         text = manifest.read_text(encoding="utf-8")
@@ -293,6 +400,7 @@ def main():
     check_serena_fragment()
     check_install()
     check_scripts_and_guard()
+    check_card_and_main_hooks()
 
     if failures:
         print("FAIL (%d)" % len(failures))
@@ -300,7 +408,7 @@ def main():
             print("  - " + f)
         return 1
     print("ok: composition is deterministic; every agent has a real tools: grant; "
-          "partition tooling installs and runs; git guard wired")
+          "partition tooling installs and runs; git guard wired; card and main-meter hooks wired")
     return 0
 
 

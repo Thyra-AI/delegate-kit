@@ -1,5 +1,26 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; exec sh \"$D/delegate-kit/bin/dk\" hook card"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; exec sh \"$D/delegate-kit/bin/dk\" hook meter --role main"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -7,6 +28,17 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/git_guard.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/git_guard.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D=\"$CLAUDE_CONFIG_DIR\"; [ -n \"$D\" ] || D=\"$HOME/.claude\"; [ -f \"$D/delegate-kit/bin/dk\" ] || exit 0; exec sh \"$D/delegate-kit/bin/dk\" hook meter --role main"
           }
         ]
       }

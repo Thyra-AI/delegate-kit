@@ -470,8 +470,9 @@ than silently dropping your whole grant.
 
 Nothing here is hidden. This is everything delegate-kit executes or writes on your machine.
 
-**A `PreToolUse` hook (`hooks/git_guard.py`).** It runs before every `Bash` tool call, and acts
-only when the call comes from a **subagent** — your own session's commands are never touched. It
+**A `PreToolUse` hook (`hooks/git_guard.py`).** It runs before every `Bash` tool call, and its
+git guard acts only when the call comes from a **subagent** — your own session's commands are never
+blocked or altered (the context meter below can add a note to your session's calls, never a decision). It
 denies destructive git: `stash`, `restore`, `clean`, `rebase`, `checkout`, `switch`,
 `filter-branch`/`filter-repo`, `reset --hard`/`--merge`, `commit --amend`, forced branch delete or
 move, `add -A`/`-u`/`.` (explicit paths only), and every push (pushes run in the main session). It only ever
@@ -480,9 +481,36 @@ decision, so Claude Code's normal permission prompts and your own allow/deny rul
 before. It is regex lexing in stdlib Python — a guardrail against habitual commands, not a sandbox.
 Its tests: `python hooks/git_guard.py --selftest`.
 
+**The card and the main context meter (`hooks/card.py`, `hooks/meter.py`).** Three more hooks run in your
+own session, all through the `dk hook` launcher that `/delegate-kit:setup` installs (they do nothing until
+you have run setup, and they fail open: an error prints nothing and never blocks a tool call).
+
+- **The card.** On `SessionStart` (`startup`, `resume`, `clear`, `compact`) the plugin adds
+  [`hooks/card.md`](hooks/card.md) to the main agent's context: under 250 tokens (about 190) of delegation rules the agent
+  descriptions can't carry (chunks of 5 or fewer calls inline, executer briefs of about 30 calls, fresh
+  executer on `SIZE-HANDBACK`, push from the main session in the background and don't poll, meter notes are
+  authoritative). It reaches the main agent only, never a subagent.
+- **The main meter.** It reads your context size from the session transcript and adds one short note, once per
+  crossing: at about **200k** ("delegate any chunk over 5 calls"), at about **300k** (write a state summary under
+  `.delegate-kit/` and offer `/compact` or a fresh session), then a short repeat every further 150k. Levels reset
+  after a compaction. It fires on `UserPromptSubmit`, after an `Agent`/`Task` launch, and (in-process, no extra
+  process) inside the git guard on `Bash` calls, where the guard decision is always computed and written first
+  so the meter can never change a deny. Every nudge is appended to `~/.claude/delegate-kit/state/events.jsonl`.
+- **Knobs and kill switches** in `~/.claude/delegate-kit/config.json` (written once by setup, never
+  overwritten): `card.enabled` (default `true`), `meter.main.enabled` (`true`), `meter.main.delegate_at` (200000),
+  `meter.main.compact_at` (300000), `meter.main.repeat_every` (150000). Delete the file's keys to get the
+  defaults back, or remove the hook entries from `hooks/hooks.json` in your own fork to drop a hook entirely.
+- **Cost.** The in-process meter adds about **7 ms** to the median `Bash` hook (measured: git_guard run as a
+  process on a 58 MB real transcript, Windows, 3 x 100 interleaved runs: p50 78-82 ms before, 85-90 ms after;
+  the transcript is read from its last 128 KB only). The card and prompt hooks start one `sh` plus one
+  `python -S` per event (about 100 ms each on the same machine, once per prompt or session start, not per tool call).
+  The meter keeps its compiled bytecode under `~/.claude/delegate-kit/pyc/`.
+
+Their tests: `python hooks/card.py --selftest`, `python hooks/meter.py --selftest`.
+
 **`/delegate-kit:setup`** runs `bin/compose.py`, which writes the composed agent definitions to
 `~/.claude/agents/` (backing up anything it overwrites to `~/.claude/agents/.delegate-kit-backup`)
-and copies `partition.py`, `bench.py`, `squash.py` and a `dk` launcher to
+and copies `partition.py`, `bench.py`, `squash.py`, the hook scripts (`meter.py`, `card.py`, `card.md`) and a `dk` launcher to
 `~/.claude/delegate-kit/bin/`. Both move under `$CLAUDE_CONFIG_DIR` if you set it.
 
 **`/delegate-kit:director on|off`** edits one key, `agent`, in the project's
@@ -537,8 +565,11 @@ delegate-kit/
 │   ├── bench.py             # per-agent tool calls, peak context, cost from your transcripts
 │   └── squash.py            # folds [Wn]-tagged commits into one per tag
 ├── hooks/
-│   ├── hooks.json           # PreToolUse hook on Bash, auto-discovered at the plugin root
-│   └── git_guard.py         # denies destructive git for subagents (--selftest)
+│   ├── hooks.json           # git guard (PreToolUse/Bash), card (SessionStart), main meter (UserPromptSubmit, PostToolUse Agent|Task)
+│   ├── git_guard.py         # denies destructive git for subagents; in-process main meter (--selftest)
+│   ├── meter.py             # context meter: main and executer ladders (--selftest)
+│   ├── card.py              # SessionStart: emits card.md, resets meter levels on compact (--selftest)
+│   └── card.md              # the delegation card, at most 250 tokens
 ├── commands/
 │   ├── setup.md             # /delegate-kit:setup
 │   ├── run.md               # /delegate-kit:run — hand an objective to the director

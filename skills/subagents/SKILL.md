@@ -172,7 +172,12 @@ Thinkers can say more than executers, but every agent reports only what is impor
 
 The orchestrator's own context is the largest cost line in measured sessions: one incident peaked at 410k in the main agent for $11.22; a build session grew the main context 255k → 297k at about $0.10 per request near the end. Every call you make re-reads all of it.
 
-Past roughly 200k, write a short state summary — decisions, open work, schedule path, `base_sha` — to the ledger or scratch, and **recommend to the user** that they continue in a fresh session, or offer to hand the remaining objective to the **director**. Don't do it unilaterally. You can't read your own context size, so use proxies: about 15 or more agent hand-backs in one session, or the user's `/context` showing over 200k.
+You don't have to estimate your own context size: a plugin hook (the context meter) measures it from the session transcript and tells you. Its notes begin "delegate-kit context meter" and arrive once per crossing, on a user prompt, after an agent launch, or alongside a Bash call. Treat them as authoritative.
+
+- **About 200k:** your own calls now cost 2-3x a worker's. Delegate any chunk of more than 5 tool calls; a single read, edit or test run stays inline.
+- **About 300k:** write a short state summary under `.delegate-kit/` — decisions, open work, schedule path, `base_sha` — and **offer the user** `/compact` or a fresh session (or to hand the remaining objective to the **director**). Don't do it unilaterally. A short repeat arrives every further 150k.
+
+The thresholds and a kill switch (`meter.main.enabled`) live in `~/.claude/delegate-kit/config.json`. If no note ever arrives (setup not run, or the meter switched off), fall back to the user's `/context` showing over 200k, or about 15 or more agent hand-backs in one session.
 
 ### Spawn fresh by default; resume sparingly
 

@@ -10,9 +10,16 @@ no decision, so the normal permission flow applies. This hook never grants permi
 Pure regex/lexing, stdlib only, no git subprocess. This is a guardrail against
 habitual commands, not a sandbox: `python -c "subprocess..."` bypasses it.
 
+Main-session context meter: when the call has no `agent_id` and nothing was denied, this hook also
+asks meter.py (same directory) for a main-agent nudge and, if there is one, emits it as a PreToolUse
+pass-through `additionalContext` (no permission decision). The guard decision is computed and
+serialized FIRST; the meter runs inside try/except and can never change a deny or raise. Set
+`meter.main.enabled: false` in ~/.claude/delegate-kit/config.json to turn it off.
+
     python git_guard.py --selftest      # exits non-zero on any mismatch
 """
 import json
+import os
 import re
 import sys
 
@@ -478,34 +485,212 @@ def selftest():
         if got != want:
             bad += 1
             print("FAIL (payload, expected %s): %r" % ("deny" if want else "pass-through", payload))
+    n, b = selftest_meter()
+    total += n
+    bad += b
     print("git_guard selftest: %d cases, %d failed" % (total, bad))
     return 1 if bad else 0
 
 
+def _old_deny_bytes(reason):
+    """The deny line exactly as this hook wrote it before the meter existed (independent of deny_output)."""
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                              "permissionDecisionReason": reason}}) + "\n"
+
+
+def selftest_meter():
+    """Deny output is byte-identical whatever the meter does; subagents never reach the meter."""
+    global meter_nudge, _load_meter
+    real, real_loader, calls, bad, total = meter_nudge, _load_meter, [], 0, 0
+    main_ls = {"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "ls"}}
+
+    def boom(payload):
+        calls.append(payload)
+        raise RuntimeError("meter exploded")
+
+    def says(payload):
+        calls.append(payload)
+        return "delegate-kit context meter: test"
+
+    def silent(payload):
+        calls.append(payload)
+        return None
+
+    def bad_loader():
+        raise ImportError("no meter")
+
+    def expect(ok, what):
+        nonlocal bad, total
+        total += 1
+        if not ok:
+            bad += 1
+            print("FAIL (meter): " + what)
+
+    try:
+        # 1. every deny case: output == the pre-meter bytes whatever the meter would say or do
+        denied = [(p, evaluate(p)) for p, want in PAYLOADS if want]
+        denied += [({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": c}}, check_command(c))
+                   for c in DENY]
+        for impl in (real, silent, says, boom):
+            meter_nudge = impl
+            for payload, reason in denied:
+                expect(bool(reason) and handle(json.dumps(payload)) == _old_deny_bytes(reason),
+                       "deny bytes changed for %r" % (payload,))
+        _load_meter = bad_loader  # the real wrapper's own try/except, with the import failing
+        meter_nudge = real
+        for payload, reason in denied[:5]:
+            expect(handle(json.dumps(payload)) == _old_deny_bytes(reason), "deny changed when meter import fails")
+        expect(handle(json.dumps(main_ls)) == "", "pass-through changed when meter import fails")
+        _load_meter = real_loader
+        # 2. a raising meter leaves a main pass-through unchanged
+        meter_nudge = boom
+        expect(handle(json.dumps(main_ls)) == "", "raising meter must leave pass-through unchanged")
+        # 3. subagent payloads never call the meter
+        calls.clear()
+        meter_nudge = says
+        for payload in (
+            {"agent_id": "a1", "session_id": "s", "tool_name": "Bash", "tool_input": {"command": "git status"}},
+            {"agent_id": "a1", "session_id": "s", "tool_name": "Bash", "tool_input": {"command": "git push"}},
+            {"agent_id": "a1", "tool_name": "Read", "tool_input": {}},
+        ):
+            expect(handle(json.dumps(payload)) in ("", _old_deny_bytes(PUSH_MESSAGE)),
+                   "unexpected subagent output: %r" % (payload,))
+        expect(not calls, "meter was called for a subagent payload")
+        # 4. a main-session pass-through carries the nudge as PreToolUse additionalContext, no decision
+        got = handle(json.dumps(dict(main_ls, tool_input={"command": "git push"})))
+        out = json.loads(got)["hookSpecificOutput"] if got else {}
+        expect(out == {"hookEventName": "PreToolUse", "additionalContext": "delegate-kit context meter: test"}
+               and got.endswith("\n"), "main nudge output shape: %r" % got)
+        expect(len(calls) == 1, "meter should be called once for a main pass-through")
+        # 5. silent meter and junk input give no output
+        meter_nudge = silent
+        expect(handle(json.dumps(main_ls)) == "", "silent meter: empty output")
+        expect(handle("not json") == "" and handle("") == "" and handle("[]") == "", "junk input: empty output")
+        # 6. the real meter, end to end: kill switch off => nothing; a 250k-context transcript => nudge
+        meter_nudge = real
+        expect(_real_meter_roundtrip(), "real meter round trip through handle()")
+    finally:
+        meter_nudge, _load_meter = real, real_loader
+    return total, bad
+
+
+def _real_meter_roundtrip():
+    import tempfile
+
+    if not os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), "meter.py")):
+        return True
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "cfg")
+        try:
+            tp = os.path.join(tmp, "t.jsonl")
+            with open(tp, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"type": "assistant", "message": {
+                    "id": "m1", "model": "x", "usage": {"input_tokens": 10, "cache_read_input_tokens": 250000}}}) + "\n")
+            payload = {"session_id": "rt", "transcript_path": tp, "hook_event_name": "PreToolUse",
+                       "tool_name": "Bash", "tool_input": {"command": "ls"}}
+            first = handle(json.dumps(payload))
+            ctx = (json.loads(first).get("hookSpecificOutput") or {}).get("additionalContext", "") if first else ""
+            again = handle(json.dumps(payload))  # once per crossing
+            os.makedirs(os.path.join(tmp, "cfg", "delegate-kit"), exist_ok=True)
+            with open(os.path.join(tmp, "cfg", "delegate-kit", "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"meter": {"main": {"enabled": False}}}, fh)
+            payload["session_id"] = "rt2"
+            off = handle(json.dumps(payload))
+            return "context meter" in ctx and again == "" and off == ""
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old
+
+
 # -------------------------------------------------------------------- main
+
+def deny_output(reason):
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+    ) + "\n"
+
+
+def nudge_output(text):
+    return json.dumps(
+        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}}
+    ) + "\n"
+
+
+def _load_meter():
+    """Import meter.py from this file's directory (lazy: only a main-session pass-through gets here).
+
+    Compiling meter.py costs ~10 ms per call, so its bytecode is cached under <config>/delegate-kit/pyc
+    (sys.pycache_prefix, even when PYTHONDONTWRITEBYTECODE is set) instead of beside the plugin files.
+    """
+    import importlib.util
+
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(os.path.expanduser("~"), ".claude")
+    old = (sys.pycache_prefix, sys.dont_write_bytecode)
+    try:
+        sys.pycache_prefix = os.path.join(cfg, "delegate-kit", "pyc")
+        sys.dont_write_bytecode = False
+        spec = importlib.util.spec_from_file_location(
+            "delegate_kit_meter", os.path.join(os.path.dirname(os.path.abspath(__file__)), "meter.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        sys.pycache_prefix, sys.dont_write_bytecode = old
+
+
+def meter_nudge(payload):
+    """Main-agent nudge text for this payload, or None. Never raises."""
+    try:
+        return _load_meter().main_nudge(payload)
+    except Exception:
+        return None
+
+
+def handle(raw):
+    """Hook stdin text -> stdout text ('' = no decision). The deny is decided and serialized first."""
+    try:
+        payload = json.loads(raw) if raw.strip() else None
+        reason = evaluate(payload)
+        if reason:
+            return deny_output(reason)
+    except Exception:
+        return ""  # on error: no decision (pass-through)
+    if not isinstance(payload, dict) or payload.get("agent_id"):
+        return ""  # subagent (or unknown): the meter is never consulted
+    try:
+        text = meter_nudge(payload)
+        return nudge_output(text) if isinstance(text, str) and text else ""
+    except Exception:
+        return ""
+
 
 def main():
     if "--selftest" in sys.argv[1:]:
-        return selftest()
+        try:
+            return selftest()
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            print("git_guard selftest: crashed")
+            return 1  # a crashing selftest must not look green
     try:
         raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        payload = json.loads(raw) if raw.strip() else None
-        reason = evaluate(payload)
+        out = handle(raw)
     except Exception:
-        return 0  # on error: no decision (pass-through)
-    if reason:
-        sys.stdout.write(
-            json.dumps(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": reason,
-                    }
-                }
-            )
-            + "\n"
-        )
+        return 0
+    if out:
+        sys.stdout.write(out)
         sys.stdout.flush()
     return 0
 
