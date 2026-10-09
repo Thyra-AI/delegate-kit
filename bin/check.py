@@ -143,6 +143,27 @@ def check_scripts_and_guard():
         failures.append("hooks/hooks.json does not reference hooks/git_guard.py")
 
 
+def check_serena_fragment():
+    """The Serena fragment must carry the exact 1.5.3 parameter names that agents
+    habitually get wrong, the activation step, and must not send agents to
+    initial_instructions (the fragment carries the essentials)."""
+    path = ROOT / "integrations" / "serena.md"
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")
+    for needle in ("name_path_pattern", "recursive", "activate_project"):
+        if needle not in text:
+            failures.append("integrations/serena.md lacks `%s`" % needle)
+    head, _, body = text.partition("\n---\n")
+    for line in body.splitlines():
+        low = line.lower()
+        if "initial_instructions" in low and not re.search("never|don't|do not", low):
+            failures.append("integrations/serena.md tells agents to use initial_instructions: %r"
+                            % line.strip()[:80])
+    if "initial_instructions" in head:
+        failures.append("integrations/serena.md grants the initial_instructions tool")
+
+
 def main():
     enable = all_integrations()
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
@@ -204,6 +225,7 @@ def main():
                 "cache prefix" % (tpl.name, hit.group(0))
             )
 
+    check_serena_fragment()
     check_install()
     check_scripts_and_guard()
 
