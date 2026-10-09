@@ -122,7 +122,8 @@ def discover(dirs: list[Path]) -> dict[str, dict]:
 # ------------------------------------------------------------------------ composing
 
 
-def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
+def compose(template_text: str, agent: str, fragments: list[dict], hooks: dict | None = None) -> str:
+    """`hooks` maps agent name -> the one-line `hooks:` frontmatter value to append (see meter_hooks)."""
     fm, body = split_frontmatter(template_text)
     applicable = [f for f in fragments if not f["agents"] or agent in f["agents"]]
 
@@ -214,6 +215,8 @@ def compose(template_text: str, agent: str, fragments: list[dict]) -> str:
                 )
             value = ", ".join(tools)
         lines.append(f"{key}: {value}")
+    if hooks and agent in hooks:
+        lines.append(f"hooks: {hooks[agent]}")
     if "tools" not in fm and granters:
         # Deliberately not written out: an absent `tools:` means "inherit every
         # tool", so these grants are already in effect. Emitting them here would
@@ -243,6 +246,35 @@ def config_dir() -> Path:
 
 def posix(path) -> str:
     return str(path).replace("\\", "/")
+
+
+def yaml_sq(text: str) -> str:
+    """A YAML single-quoted scalar: the only escape is a doubled quote, so backslashes stay literal."""
+    return "'" + text.replace("'", "''") + "'"
+
+
+def meter_hooks(python: str, config: Path) -> dict:
+    """Per-agent frontmatter `hooks:` values (a ONE-LINE flow mapping: this parser reads one line per key).
+
+    The executer's size meter. Each command runs `<python> -S <config>/delegate-kit/bin/meter.py ...`
+    with both paths absolute, double-quoted and forward-slashed, rendered here because they are
+    machine-specific (templates stay byte-identical across machines). The tool events match every
+    tool (`matcher: "*"`); `Stop` in an agent definition fires as SubagentStop and takes no matcher.
+    """
+    meter = posix(config / "delegate-kit" / "bin" / "meter.py")
+    base = f'"{posix(python)}" -S "{meter}" --role executer'
+
+    def entry(flag: str, matcher: bool) -> str:
+        cmd = yaml_sq(f"{base} {flag}".rstrip())
+        m = 'matcher: "*", ' if matcher else ""
+        return "[{" + m + "hooks: [{type: command, command: " + cmd + "}]}]"
+
+    executer = (
+        "{PreToolUse: " + entry("--gate", True)
+        + ", PostToolUse: " + entry("", True)
+        + ", Stop: " + entry("--cleanup", False) + "}"
+    )
+    return {"executer": executer}
 
 
 def launcher_text(python: str, scripts: list[str]) -> str:
@@ -416,11 +448,16 @@ def main() -> int:
     # holding a mix of old and new files -- and when the failure is a bad tool
     # grant, one of the files already on disk is the compromised one. Validating
     # everything first means a failed compose changes nothing at all.
+    # The size-meter hooks are only wired when meter.py is being installed beside the agents, so a
+    # scratch --out compose never points an agent at a script that is not there.
+    hooks = None
+    if (args.home or args.out == default_out) and (here / "hooks" / "meter.py").is_file():
+        hooks = meter_hooks(sys.executable or "python3", config)
     composed = []
     for template in templates:
         agent = template.stem
         try:
-            text = compose(template.read_text(encoding="utf-8"), agent, enabled)
+            text = compose(template.read_text(encoding="utf-8"), agent, enabled, hooks)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             print("error: nothing written; no agent definition was changed.", file=sys.stderr)

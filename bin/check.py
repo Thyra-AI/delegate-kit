@@ -26,9 +26,12 @@ Two properties matter enough to guard:
    real ~/.claude) installs byte-equal copies of bin/{partition,bench,squash}.py plus a
    `dk` launcher, and that launcher runs. Each script answers `--help`.
 
-5. **The self-tests pass.** `bin/partition.py --selftest`, `bin/bench.py --selftest` and `hooks/meter.py --selftest` pass.
+5. **The executer size budget is wired.** The composed executer has `maxTurns: 150` and a one-line
+   `hooks:` mapping with PreToolUse/PostToolUse/Stop commands whose interpreter and meter.py exist.
 
-6. **The git guard is wired.** `hooks/git_guard.py --selftest` passes, and
+6. **The self-tests pass.** `bin/partition.py --selftest`, `bin/bench.py --selftest` and `hooks/meter.py --selftest` pass.
+
+7. **The git guard is wired.** `hooks/git_guard.py --selftest` passes, and
    `hooks/hooks.json` parses and points at a `hooks/git_guard.py` that exists.
 """
 import json
@@ -84,6 +87,41 @@ def check_roster(composed):
         failures.append("partitioner has an empty or missing tools list")
 
 
+def check_executer_budget(home):
+    """The composed executer carries maxTurns 150 and the one-line size-meter hooks, and every path
+    the hook commands name exists in the throwaway home (or is the interpreter running this)."""
+    path = home / "agents" / "executer.md"
+    fm = path.read_text(encoding="utf-8").split("---", 2)[1] if path.is_file() else ""
+    if not re.search(r"^maxTurns:\s*150\s*$", fm, re.M):
+        failures.append("composed executer lacks `maxTurns: 150`")
+    lines = [ln for ln in fm.splitlines() if ln.startswith("hooks:")]
+    if len(lines) != 1:
+        failures.append("composed executer has %d one-line `hooks:` entries, expected 1" % len(lines))
+        return
+    line = lines[0]
+    if "${" in line:
+        failures.append("executer hooks line contains `${`: %s" % line)
+    for event in ("PreToolUse", "PostToolUse", "Stop"):
+        if event + ": [" not in line:
+            failures.append("executer hooks line lacks %s" % event)
+    for flag in ("--gate", "--cleanup"):
+        if line.count(flag) != 1:
+            failures.append("executer hooks line should carry %s exactly once" % flag)
+    cmds = re.findall(r"command: '((?:[^']|'')*)'", line)
+    if len(cmds) != 3:
+        failures.append("executer hooks line has %d commands, expected 3" % len(cmds))
+    meter = (home / "delegate-kit" / "bin" / "meter.py").as_posix()
+    for cmd in cmds:
+        m = re.match(r'"([^"]+)" -S "([^"]+)" --role executer', cmd)
+        if not m:
+            failures.append("executer hook command is not `\"<python>\" -S \"<meter>\" --role executer`: %s" % cmd)
+            continue
+        if not Path(m.group(1)).is_file():
+            failures.append("executer hook interpreter does not exist: %s" % m.group(1))
+        if m.group(2) != meter or not Path(m.group(2)).is_file():
+            failures.append("executer hook meter path is wrong or missing: %s (want %s)" % (m.group(2), meter))
+
+
 def check_install():
     """Compose into a throwaway --home and exercise what lands there."""
     with tempfile.TemporaryDirectory() as home:
@@ -103,6 +141,7 @@ def check_install():
             failures.append("compose did not install meter.py")
         elif meter_got.read_bytes() != meter_src.read_bytes():
             failures.append("installed meter.py differs from hooks/meter.py")
+        check_executer_budget(Path(home))
         cfg = Path(home) / "delegate-kit" / "config.json"
         try:
             defaults = json.loads(cfg.read_text(encoding="utf-8"))

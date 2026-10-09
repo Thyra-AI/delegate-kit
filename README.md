@@ -319,7 +319,18 @@ exact multiple is not.*
 
 One executer was handed a whole "Stage 2": build a wrapper, migrate every provider, update the callers, wire the probes, run the suite. It did not loop. It was simply scoped across too many areas, and it finished with **131 tool calls, a 343k-token peak context and $8.07** of spend. The same work split into continuations ran at **47–70k peak and roughly $0.3–0.7 each**. (Measured with `dk bench` on the real transcripts. The prices in it are unverified defaults, so read the dollars as relative, not as a bill.)
 
-The fix is to scope and size the work at planning time, not to cut an agent off mid-run. There is no runtime cap of any kind: agents do what they're told, and control is how the work was cut. The sizing target is **about 100k tokens of peak context per agent, roughly 30 tool calls**. It is an input to the plan, not a limit.
+The fix is to scope and size the work at planning time. The sizing target is **about 100k tokens of peak context per agent, roughly 30 tool calls**; it is an input to the plan. The executer also has a runtime budget as a backstop (below), so a plan that was cut too big ends in a clean handback rather than a 340k-token run.
+
+**Executer size budget.** The composed `executer` carries a frontmatter hook (rendered by `compose.py` with absolute paths to `~/.claude/delegate-kit/bin/meter.py`) that meters its own context and fires only for its own tool calls:
+
+| Level | Trigger | What happens |
+|---|---|---|
+| L1 | every 40 tool calls | nudge: commit the parts that are complete and checked |
+| L2 | 60 calls or 120k context | nudge: finish the step, run the scoped check, commit, return a `SIZE-HANDBACK` |
+| L3 | 150k context | context-growing tools are denied ("Size budget reached"); only edits to files it already touched and `git status/diff/add/commit` remain |
+| backstop | `maxTurns: 150` | native stop; the parent gets no report, so read `git log` |
+
+A `SIZE-HANDBACK` report (done / remaining with `path:line` anchors / commits / unverified) tells the orchestrator to spawn a **fresh** executer with the remaining list under the same `[Wn]` tag, never to resume the old one. Thresholds and the kill switch live in `~/.claude/delegate-kit/config.json`, written once by `/delegate-kit:setup` and never overwritten: `meter.executer.{enabled, commit_every_calls, wrapup_calls, wrapup_tokens, stop_tokens}` (defaults 40, 60, 120000, 150000). Set `"meter": {"executer": {"enabled": false}}` to turn the nudges and the L3 gate off; `maxTurns` stays.
 
 **The procedure, in brief** (the `/subagents` skill has the full version, and the director follows it too):
 
