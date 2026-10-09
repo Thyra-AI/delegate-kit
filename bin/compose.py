@@ -243,11 +243,17 @@ def sha(text: str) -> str:
 def config_dir() -> Path:
     """Where Claude Code keeps agents/ and friends: CLAUDE_CONFIG_DIR, else ~/.claude."""
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    return Path(env).expanduser() if env else Path.home() / ".claude"
+    path = Path(env).expanduser() if env else Path.home() / ".claude"
+    return Path(os.path.abspath(path))  # hook paths must be absolute: agents run in any project dir
 
 
 def posix(path) -> str:
     return str(path).replace("\\", "/")
+
+
+def sh_dq(text: str) -> str:
+    """Escape text for a POSIX double-quoted string: backslash, `$`, backtick and `"` stay literal."""
+    return "".join("\\" + c if c in '\\$`"' else c for c in text)
 
 
 def yaml_sq(text: str) -> str:
@@ -264,10 +270,13 @@ def meter_hooks(python: str, config: Path) -> dict:
     tool (`matcher: "*"`); `Stop` in an agent definition fires as SubagentStop and takes no matcher.
     """
     meter = posix(config / "delegate-kit" / "bin" / "meter.py")
-    base = f'"{posix(python)}" -S "{meter}" --role executer'
+    base = f'"{sh_dq(posix(python))}" -S "{sh_dq(meter)}" --role executer'
 
     def entry(flag: str, matcher: bool) -> str:
-        cmd = yaml_sq(f"{base} {flag}".rstrip())
+        # Fail-open: a missing meter.py or interpreter must never exit 2 (PreToolUse exit 2 blocks every
+        # tool call; Stop exit 2 keeps the agent running). The gate denies via JSON on stdout with exit 0,
+        # so `|| exit 0` only swallows failures, and stdout is untouched.
+        cmd = yaml_sq(f"{base} {flag}".rstrip() + " || exit 0")
         m = 'matcher: "*", ' if matcher else ""
         return "[{" + m + "hooks: [{type: command, command: " + cmd + "}]}]"
 
@@ -349,6 +358,14 @@ def write_config_defaults(here: Path, config: Path) -> None:
     print(f"wrote {target}")
 
 
+def symlinked_install_dir(config: Path) -> Path | None:
+    """The first install directory that is a symlink (scripts are never written through one), else None."""
+    for d in (config / "delegate-kit", config / "delegate-kit" / "bin"):
+        if d.is_symlink():
+            return d
+    return None
+
+
 def install_scripts(here: Path, config: Path, dry_run: bool) -> Path | None:
     """Copy the plugin's scripts and write the launcher. Returns the launcher path."""
     src_dir = here / "bin"
@@ -364,9 +381,9 @@ def install_scripts(here: Path, config: Path, dry_run: bool) -> Path | None:
         names = [n + ".py" for n in present + hooks_present] + files_present
         print(f"would install {', '.join(names)} and dk to {dest}")
         return launcher
-    for d in (config / "delegate-kit", dest):
-        if d.is_symlink():
-            sys.exit(f"refusing to install scripts: {d} is a symlink")
+    refused = symlinked_install_dir(config)
+    if refused:
+        sys.exit(f"refusing to install scripts: {refused} is a symlink")
     dest.mkdir(parents=True, exist_ok=True)
     for path in [dest / f"{n}.py" for n in present + hooks_present] + [dest / n for n in files_present] + [launcher]:
         if path.is_symlink():
@@ -398,7 +415,7 @@ def main() -> int:
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--home", type=Path, default=None)
     home_arg, _ = pre.parse_known_args()
-    config = home_arg.home if home_arg.home else config_dir()
+    config = Path(os.path.abspath(home_arg.home.expanduser())) if home_arg.home else config_dir()
     default_out = config / "agents"
     user_integrations = config / "delegate-kit" / "integrations"
 
@@ -460,6 +477,13 @@ def main() -> int:
     if not templates:
         print(f"error: no templates in {args.templates}", file=sys.stderr)
         return 2
+
+    # Refuse a symlinked install dir BEFORE any agent file is written, so a refused run changes nothing.
+    if not args.dry_run and (args.home or args.out == default_out):
+        refused = symlinked_install_dir(config)
+        if refused:
+            print(f"error: refusing to install scripts: {refused} is a symlink; nothing written.", file=sys.stderr)
+            return 1
 
     args.out.mkdir(parents=True, exist_ok=True)
     backup = args.out / ".delegate-kit-backup"

@@ -63,6 +63,7 @@ SCRIPTS = ("partition", "bench", "squash")
 VOLATILE = re.compile(r"\{\{|\$\{|%\(|\buuid\b|\bdatetime\b|\btime\.time\b|<timestamp>", re.I)
 
 failures = []
+skipped = []  # checks that could not run here; a skip is never a pass (see --allow-skip)
 
 
 def all_integrations():
@@ -100,6 +101,48 @@ def check_roster(composed):
         failures.append("partitioner has an empty or missing tools list")
 
 
+def flow_balanced(text):
+    """True when every `[`/`{` in a one-line YAML flow value closes in order, ignoring single-quoted
+    scalars (`''` is an escaped quote) and double-quoted scalars (backslash escapes)."""
+    stack, i, n = [], 0, len(text)
+    pairs = {"]": "[", "}": "{"}
+    while i < n:
+        c = text[i]
+        if c in "'\"":
+            j = i + 1
+            while j < n:
+                if c == "\"" and text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == c:
+                    if c == "'" and text[j + 1:j + 2] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            else:
+                return False  # unterminated quote
+            i = j
+        elif c in "[{":
+            stack.append(c)
+        elif c in pairs:
+            if not stack or stack.pop() != pairs[c]:
+                return False
+        i += 1
+    return not stack
+
+
+def sh_unescape(text):
+    """Undo compose.sh_dq: a backslash before a backslash, dollar, backtick or double quote is dropped."""
+    out, k = [], 0
+    while k < len(text):
+        if text[k] == "\\" and k + 1 < len(text) and text[k + 1] in '\\$`"':
+            k += 1
+        out.append(text[k])
+        k += 1
+    return "".join(out)
+
+
 def check_executer_budget(home):
     """The composed executer carries maxTurns 150 and the one-line size-meter hooks, and every path
     the hook commands name exists in the throwaway home (or is the interpreter running this)."""
@@ -110,8 +153,22 @@ def check_executer_budget(home):
     lines = [ln for ln in fm.splitlines() if ln.startswith("hooks:")]
     if len(lines) != 1:
         failures.append("composed executer has %d one-line `hooks:` entries, expected 1" % len(lines))
-        return
+        return []
     line = lines[0]
+    value = line[len("hooks:"):].strip()
+    if not value.startswith("{") or not value.endswith("}") or not flow_balanced(value):
+        failures.append("executer hooks line is not a balanced one-line flow mapping: %s" % line)
+    try:
+        import yaml  # optional: when PyYAML is around, require the line to really parse
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        try:
+            doc = yaml.safe_load(value)
+            if not (isinstance(doc, dict) and {"PreToolUse", "PostToolUse", "Stop"} <= set(doc)):
+                failures.append("executer hooks line parsed but lacks PreToolUse/PostToolUse/Stop: %s" % line)
+        except yaml.YAMLError as exc:
+            failures.append("executer hooks line is not valid YAML: %s" % exc)
     if "${" in line:
         failures.append("executer hooks line contains `${`: %s" % line)
     for event in ("PreToolUse", "PostToolUse", "Stop"):
@@ -120,19 +177,40 @@ def check_executer_budget(home):
     for flag in ("--gate", "--cleanup"):
         if line.count(flag) != 1:
             failures.append("executer hooks line should carry %s exactly once" % flag)
-    cmds = re.findall(r"command: '((?:[^']|'')*)'", line)
+    cmds = [c.replace("''", "'") for c in re.findall(r"command: '((?:[^']|'')*)'", line)]
     if len(cmds) != 3:
         failures.append("executer hooks line has %d commands, expected 3" % len(cmds))
     meter = (home / "delegate-kit" / "bin" / "meter.py").as_posix()
     for cmd in cmds:
-        m = re.match(r'"([^"]+)" -S "([^"]+)" --role executer', cmd)
+        m = re.match(r'"((?:[^"\\]|\\.)+)" -S "((?:[^"\\]|\\.)+)" --role executer', cmd)
         if not m:
             failures.append("executer hook command is not `\"<python>\" -S \"<meter>\" --role executer`: %s" % cmd)
             continue
-        if not Path(m.group(1)).is_file():
-            failures.append("executer hook interpreter does not exist: %s" % m.group(1))
-        if m.group(2) != meter or not Path(m.group(2)).is_file():
-            failures.append("executer hook meter path is wrong or missing: %s (want %s)" % (m.group(2), meter))
+        py, mp = sh_unescape(m.group(1)), sh_unescape(m.group(2))
+        if not Path(py).is_file():
+            failures.append("executer hook interpreter does not exist: %s" % py)
+        if mp != meter or not Path(mp).is_file():
+            failures.append("executer hook meter path is wrong or missing: %s (want %s)" % (mp, meter))
+        if not cmd.rstrip().endswith("|| exit 0") or re.search(r"\bexec\b", cmd):
+            failures.append("executer hook command is not fail-open (no `exec`, must end in `|| exit 0`): %s" % cmd)
+    return cmds
+
+
+def check_executer_fail_open(cmds, sh):
+    """Run every rendered executer hook command with the meter script gone, and with the interpreter
+    gone: each must exit 0 (exit 2 would block every PreToolUse call / keep a Stop agent running)."""
+    with tempfile.TemporaryDirectory() as empty:
+        gone = (Path(empty) / "missing" / "meter.py").as_posix()
+        for cmd in cmds:
+            m = re.match(r'"((?:[^"\\]|\\.)+)" -S "((?:[^"\\]|\\.)+)"', cmd)
+            if not m:
+                continue  # already reported
+            for what, broken in (("meter.py", cmd.replace(m.group(2), gone, 1)),
+                                 ("interpreter", cmd.replace(m.group(1), gone + ".exe", 1))):
+                r = subprocess.run([sh, "-c", broken], input="{}", capture_output=True, text=True)
+                if r.returncode != 0:
+                    failures.append("executer hook with missing %s must exit 0 (rc %d): %s"
+                                    % (what, r.returncode, broken[-60:]))
 
 
 CARD_MAX_TOKENS = 250
@@ -190,7 +268,7 @@ def check_hook_launcher(home, dk):
     """Run the exact hooks.json commands against the throwaway home (and against an empty one)."""
     sh = shutil.which("sh")
     if not sh:
-        return
+        return  # check_install already recorded the skip
     cmds = {ev: hook_commands(ev) for ev in ("SessionStart", "UserPromptSubmit", "PostToolUse")}
     if not all(cmds.values()):
         return  # already reported
@@ -265,7 +343,7 @@ def check_install():
             failures.append("compose did not install meter.py")
         elif meter_got.read_bytes() != meter_src.read_bytes():
             failures.append("installed meter.py differs from hooks/meter.py")
-        check_executer_budget(Path(home))
+        exec_cmds = check_executer_budget(Path(home))
         for name in ("card.py", "card.md"):
             src, got = ROOT / "hooks" / name, dest / name
             if not got.is_file():
@@ -292,8 +370,9 @@ def check_install():
             return
         sh = shutil.which("sh")
         if not sh:
-            print("note: `sh` not on PATH; skipping the dk launcher run check")
+            skipped.append("`sh` not on PATH: the dk launcher, hook launcher and executer fail-open run checks did not run")
             return
+        check_executer_fail_open(exec_cmds, sh)
         r = subprocess.run([sh, dk.as_posix(), "partition", "--help"],
                            capture_output=True, text=True)
         if r.returncode != 0:
@@ -438,6 +517,13 @@ def main():
         for f in failures:
             print("  - " + f)
         return 1
+    if skipped:
+        for note in skipped:
+            print("SKIPPED: " + note)
+        if "--allow-skip" not in sys.argv[1:]:
+            print("FAIL: %d check(s) could not run; install `sh` (Git Bash) or pass --allow-skip" % len(skipped))
+            return 1
+        print("WARNING: passing with skipped checks (--allow-skip); this is NOT a full pass")
     print("ok: composition is deterministic; every agent has a real tools: grant; "
           "partition tooling installs and runs; git guard wired; card and main-meter hooks wired")
     return 0
