@@ -260,8 +260,10 @@ def check_card_and_main_hooks():
         if re.search(r"\bexec\b", cmd) or not cmd.rstrip().endswith("|| exit 0"):
             failures.append("hooks.json %s command is not fail-open (no `exec`, must end in `|| exit 0`): %s" % (ev, cmd))
     pre = hook_commands("PreToolUse")
-    if [m for m, _ in pre] != ["Bash"] or "hooks/git_guard.py" not in pre[0][1]:
-        failures.append("hooks.json PreToolUse should be exactly the Bash git_guard entry")
+    if [m for m, _ in pre] != ["Bash|PowerShell"] or "hooks/git_guard.py" not in pre[0][1]:
+        failures.append("hooks.json PreToolUse should be exactly the Bash|PowerShell git_guard entry")
+    elif not pre[0][1].rstrip().endswith("|| exit 0"):
+        failures.append("hooks.json git_guard command is not fail-open (must end in `|| exit 0`): %s" % pre[0][1])
 
 
 def check_hook_launcher(home, dk):

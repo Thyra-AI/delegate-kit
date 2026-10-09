@@ -327,7 +327,7 @@ The fix is to scope and size the work at planning time. The sizing target is **a
 |---|---|---|
 | L1 | every 40 tool calls | nudge: commit the parts that are complete and checked |
 | L2 | 60 calls or 120k context | nudge: finish the step, run the scoped check, commit, return a `SIZE-HANDBACK` |
-| L3 | 150k context | context-growing tools are denied ("Size budget reached"); only edits to files it already touched and single `git status/diff/log -1/add/commit` commands remain (no `&&`, `cd`, heredoc, `$()`, `-a`) |
+| L3 | 150k context | context-growing tools are denied ("Size budget reached"); only edits to files it already touched and single `git status`, `git diff --stat|--name-only|--name-status` (optionally `--cached`), `git log -1` (or `-n` up to 5), `git add <explicit file paths>`, `git commit -m` commands remain (no `&&`, `cd`, heredoc, `$()`, `-a`, globs, directories) |
 | backstop | `maxTurns: 150` | native stop; the parent gets no report, so read `git log` |
 
 A `SIZE-HANDBACK` report (done / remaining with `path:line` anchors / commits / unverified) tells the orchestrator to spawn a **fresh** executer with the remaining list under the same `[Wn]` tag, never to resume the old one. Thresholds and the kill switch live in `~/.claude/delegate-kit/config.json`, written once by `/delegate-kit:setup` and never overwritten: `meter.executer.{enabled, commit_every_calls, wrapup_calls, wrapup_tokens, stop_tokens}` (defaults 40, 60, 120000, 150000). Set `"meter": {"executer": {"enabled": false}}` to turn the nudges and the L3 gate off; `maxTurns` stays.
@@ -359,14 +359,14 @@ The partition script is advisory. It exists so the planning agent spends few tok
 
 **Tag-and-squash commits.** Each agent commits its own work with the tag of its piece: `git add <explicit paths>`, then `git commit -m "[W3] what changed"`. One commit or many is fine, because the tag is what groups them. When the run is over, `dk squash` folds every tag into a single commit, starting from `base_sha`. It refuses on a dirty tree, never touches anything already pushed, and on a conflict it aborts and leaves history exactly as it was. The result is one commit per piece of work, with no coordination between parallel agents.
 
-**The git guard.** The plugin ships a `PreToolUse` hook (`hooks/git_guard.py`) that denies destructive git commands run through a subagent's `Bash`:
+**The git guard.** The plugin ships a `PreToolUse` hook (`hooks/git_guard.py`) that denies destructive git commands run through a subagent's `Bash` or `PowerShell` tool:
 
 - `stash`, `restore`, `clean`, `rebase`, `filter-branch`, `filter-repo`, `checkout` and `switch`,
 - `reset --hard` or `--merge`, `commit --amend`, `branch -D`,
 - `add -A`, `add .` and the other add-everything forms,
 - every `git push`, plain or forced, however it is chained or wrapped. Pushes run in the main session: a subagent commits its work and reports `ready to push: <branch> @ <sha>`.
 
-`git add <paths>`, `commit`, `log`, `diff`, `status` and `show` pass. When you push from your own session, run it as a background Bash call (`run_in_background: true`), because a pre-push review such as review-gate's can exceed the 10-minute foreground limit; the agent tells you it is running, does not poll, and reports the review verdict when the completion notification arrives. `checkout` and `switch` are blocked outright, since `checkout <file>` and `checkout <branch>` can't be told apart and either one disturbs a tree other agents are working in. The hook covers **subagents only**: your own session is untouched. It is a guardrail against habitual commands, not a sandbox. It doesn't catch `bash -c` in every form, `$(...)`, aliases, or `python -c "import subprocess..."`, and it fails open, so a bug in the hook never blocks your agents.
+`git add <paths>`, `commit`, `log`, `diff`, `status` and `show` pass. When you push from your own session, run it as a background Bash call (`run_in_background: true`), because a pre-push review such as review-gate's can exceed the 10-minute foreground limit; the agent tells you it is running, does not poll, and reports the review verdict when the completion notification arrives. `checkout` and `switch` are blocked outright, since `checkout <file>` and `checkout <branch>` can't be told apart and either one disturbs a tree other agents are working in. The hook covers **subagents only**: your own session is untouched. It is a guardrail against habitual commands, not a sandbox. It unquotes words the way bash does (`git \push`, `git $'push'` are caught) and scans `$(...)`, backticks and the script argument of `sh -c`/`bash -c`/`eval`/`powershell -Command`, but a quoted argument such as `grep "git push" docs/` is data and passes. Known gaps: the body of a heredoc is never scanned (so `bash <<EOF ... git push ... EOF` gets through), and it doesn't catch aliases, scripts that call git, or `python -c "import subprocess..."`. It fails open, so a bug in the hook never blocks your agents.
 
 ## Integrations — the agents are wired for what you actually have
 
@@ -470,9 +470,9 @@ than silently dropping your whole grant.
 
 Nothing here is hidden. This is everything delegate-kit executes or writes on your machine.
 
-**A `PreToolUse` hook (`hooks/git_guard.py`).** It runs before every `Bash` tool call, and its
+**A `PreToolUse` hook (`hooks/git_guard.py`).** It runs before every `Bash` and `PowerShell` tool call, and its
 git guard acts only when the call comes from a **subagent** — your own session's commands are never
-blocked or altered (the context meter below can add a note to your session's calls, never a decision). It
+blocked or altered (the context meter below can add a note to your session's calls, never a decision). If the hook script or its interpreters are missing it passes through (`|| exit 0`) rather than blocking your tools. It
 denies destructive git: `stash`, `restore`, `clean`, `rebase`, `checkout`, `switch`,
 `filter-branch`/`filter-repo`, `reset --hard`/`--merge`, `commit --amend`, forced branch delete or
 move, `add -A`/`-u`/`.` (explicit paths only), and every push (pushes run in the main session). It only ever
@@ -566,7 +566,7 @@ delegate-kit/
 │   ├── bench.py             # per-agent tool calls, peak context, cost from your transcripts
 │   └── squash.py            # folds [Wn]-tagged commits into one per tag
 ├── hooks/
-│   ├── hooks.json           # git guard (PreToolUse/Bash), card (SessionStart), main meter (UserPromptSubmit, PostToolUse Agent|Task)
+│   ├── hooks.json           # git guard (PreToolUse/Bash|PowerShell), card (SessionStart), main meter (UserPromptSubmit, PostToolUse Agent|Task)
 │   ├── git_guard.py         # denies destructive git for subagents; in-process main meter (--selftest)
 │   ├── meter.py             # context meter: main and executer ladders (--selftest)
 │   ├── card.py              # SessionStart: emits card.md, resets meter levels on compact (--selftest)

@@ -23,11 +23,11 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/git_guard.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/git_guard.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/git_guard.py\" || python \"${CLAUDE_PLUGIN_ROOT}/hooks/git_guard.py\" || exit 0"
           }
         ]
       }

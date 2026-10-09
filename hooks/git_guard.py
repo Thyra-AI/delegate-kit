@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse hook (matcher: Bash) - deny destructive git commands and all pushes to subagents.
+"""PreToolUse hook (matcher: Bash|PowerShell) - deny destructive git commands and all pushes to subagents.
 
 Reads the hook JSON on stdin. Acts only when the input carries an `agent_id`
 (i.e. the call comes from a subagent); the user's own session is never touched.
@@ -63,13 +63,91 @@ SCAN_STOP = {"echo", "printf"}
 ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 ADD_ALL_PATHSPEC = re.compile(r"^(\./*|:/|\*)$")
 SHORT_CLUSTER = re.compile(r"^-[A-Za-z]+$")
+GIT_NAMES = ("git", "git.exe")
+BASH_SHELLS = {n + x for n in ("sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh") for x in ("", ".exe")}
+PS_SHELLS = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+CMD_SHELLS = {"cmd", "cmd.exe"}
+EVALS = {"eval"}
+PS_EVALS = {"iex", "invoke-expression"}
+SCRIPT_RUNNERS = BASH_SHELLS | PS_SHELLS | CMD_SHELLS | EVALS | PS_EVALS
 HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z0-9_]+)\2")
+PS_HERESTRING = re.compile(r"@(['\"])[ \t]*\r?\n.*?\r?\n\1@", re.S)
+ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+               "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
 
 
 # ---------------------------------------------------------------- lexing
 
-def strip_heredocs(cmd):
-    """Drop heredoc bodies (and their terminator lines) so prose is not scanned."""
+class Tok(str):
+    """A shell word. `subs` holds the `$(...)` / backtick bodies found in its double-quoted parts."""
+
+    subs = ()
+
+
+def ansi_c(s):
+    """Decode the body of a bash `$'...'` string."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        d = s[i + 1]
+        if d in ANSI_SIMPLE:
+            out.append(ANSI_SIMPLE[d])
+            i += 2
+        elif d in "01234567":
+            m = re.match(r"[0-7]{1,3}", s[i + 1:])
+            out.append(chr(int(m.group(), 8) & 0xFF))
+            i += 1 + len(m.group())
+        elif d in "xuU" and re.match(r"[0-9a-fA-F]", s[i + 2:i + 3]):
+            m = re.match(r"[0-9a-fA-F]{1,%d}" % {"x": 2, "u": 4, "U": 8}[d], s[i + 2:])
+            try:
+                out.append(chr(int(m.group(), 16)))
+            except (ValueError, OverflowError):
+                out.append("?")
+            i += 2 + len(m.group())
+        else:
+            out.append("\\" + d)
+            i += 2
+    return "".join(out)
+
+
+def substitutions(raw, ps):
+    """Bodies of `$(...)` and backtick substitutions inside the raw text of a double-quoted string."""
+    esc = "`" if ps else "\\"
+    out, i, n = [], 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c == esc:
+            i += 2
+        elif c == "$" and raw[i + 1:i + 2] == "(":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += (raw[j] == "(") - (raw[j] == ")")
+                j += 1
+            out.append(raw[i + 2:j - 1] if depth == 0 else raw[i + 2:j])
+            i = j
+        elif c == "`" and not ps:
+            j = i + 1
+            while j < n and raw[j] != "`":
+                j += 2 if raw[j] == "\\" else 1
+            out.append(raw[i + 1:j])
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def strip_heredocs(cmd, ps=False):
+    """Drop heredoc bodies (and their terminator lines) so prose is not scanned.
+
+    PowerShell has here-strings (`@'...'@`) instead; their bodies are dropped the same way.
+    Known gap: a body that is itself run as a script (`bash <<EOF`) is not scanned.
+    """
+    if ps:
+        return PS_HERESTRING.sub("", cmd)
     out, pending = [], []
     for line in cmd.split("\n"):
         if pending:
@@ -86,21 +164,28 @@ def strip_heredocs(cmd):
     return "\n".join(out)
 
 
-def lex(cmd):
-    """Quote-aware split into segments (lists of tokens).
+def lex(cmd, ps=False):
+    """Quote-aware split into segments (lists of tokens), unquoted the way the shell would.
 
-    Segments end at && || ; | & newline ( ) and backtick outside quotes.
-    Quoted content stays inside its token (scanned again by the caller).
+    Segments end at && || ; | & newline ( ) and (bash only) backtick outside quotes.
+    Words are unquoted like bash does: an unquoted backslash is dropped and `$'...'` is
+    ANSI-C decoded. With ps=True (PowerShell) backslash is a literal path separator and
+    backtick is the escape character instead.
+    A token's `.subs` lists the `$(...)`/backtick bodies of its double-quoted parts; the
+    caller scans those. Other quoted content is plain data and is not re-scanned.
     """
     segs, toks = [], []
-    buf, has = [], False
+    buf, has, subs = [], False, []
     i, n = 0, len(cmd)
+    seps = "\n;|()" if ps else "\n;|()`"
 
     def flush():
-        nonlocal buf, has
+        nonlocal buf, has, subs
         if has or buf:
-            toks.append("".join(buf))
-        buf, has = [], False
+            t = Tok("".join(buf))
+            t.subs = tuple(subs)
+            toks.append(t)
+        buf, has, subs = [], False, []
 
     def end_seg():
         nonlocal toks
@@ -113,12 +198,12 @@ def lex(cmd):
         c = cmd[i]
         if c in " \t\r":
             flush()
-        elif c in "\n;|()`":
+        elif c in seps:
             end_seg()
         elif c == "&":
             prev = cmd[i - 1] if i else ""
             nxt = cmd[i + 1] if i + 1 < n else ""
-            if nxt == "&" or (prev not in "<>" and nxt != ">"):
+            if nxt == "&" or ((not prev or prev not in "<>") and nxt != ">"):
                 end_seg()
             else:
                 buf.append(c)
@@ -133,21 +218,38 @@ def lex(cmd):
                 j = n
             buf.append(cmd[i + 1:j])
             i = j
+        elif c == "$" and not ps and cmd[i + 1:i + 2] == "'":
+            has = True
+            j = i + 2
+            while j < n and cmd[j] != "'":
+                j += 2 if cmd[j] == "\\" else 1
+            buf.append(ansi_c(cmd[i + 2:j]))
+            i = j
+        elif c == "$" and not ps and cmd[i + 1:i + 2] == '"':
+            pass  # $"..." (locale string) is an ordinary double-quoted string
         elif c == '"':
             has = True
             i += 1
+            start = i
             while i < n and cmd[i] != '"':
-                if cmd[i] == "\\" and i + 1 < n and cmd[i + 1] in '"\\$`\n':
+                if ps:
+                    if cmd[i] == "`" and i + 1 < n:
+                        i += 1
+                elif cmd[i] == "\\" and i + 1 < n and cmd[i + 1] in '"\\$`\n':
                     i += 1
                 buf.append(cmd[i])
                 i += 1
-        elif c == "\\":
-            if i + 1 < n and cmd[i + 1] in " \t\"'$\\`\n;&|()<>":
+            subs.extend(substitutions(cmd[start:i], ps))
+        elif c == "\\" and not ps:
+            if i + 1 < n:  # bash drops an unquoted backslash and keeps the next character
                 i += 1
                 if cmd[i] != "\n":
                     buf.append(cmd[i])
-            else:
-                buf.append(c)  # Windows path separator, keep literally
+        elif c == "`" and ps:
+            if i + 1 < n:
+                i += 1
+                if cmd[i] not in "\r\n":
+                    buf.append(cmd[i])
         else:
             buf.append(c)
         i += 1
@@ -161,8 +263,11 @@ def basename(tok):
     return re.split(r"[\\/]", tok)[-1].lower()
 
 
-def git_args_of(tokens):
-    """If this segment is a git invocation, return the tokens after `git`."""
+def find_command(tokens, names):
+    """Index of the command token if this segment runs one of `names`, else -1.
+
+    Skips leading env assignments and wrappers (`sudo`, `env`, `timeout 5`, `then`...).
+    """
     i, n = 0, len(tokens)
     while i < n:
         t = tokens[i]
@@ -170,12 +275,12 @@ def git_args_of(tokens):
             i += 1
         elif basename(t) in WRAPPERS:
             i += 1
-            while i < n and tokens[i].startswith("-") and basename(tokens[i]) != "git":
+            while i < n and tokens[i].startswith("-") and basename(tokens[i]) not in names:
                 i += 1
             if basename(t) in SCAN_WRAPPERS:
-                # Positional args (`timeout 5`, `nice -n 5`): look ahead for git.
+                # Positional args (`timeout 5`, `nice -n 5`): look ahead for the command.
                 j = i
-                while j < n and basename(tokens[j]) not in ("git", "git.exe"):
+                while j < n and basename(tokens[j]) not in names:
                     if basename(tokens[j]) in SCAN_STOP:
                         j = n
                     else:
@@ -184,9 +289,53 @@ def git_args_of(tokens):
                     i = j
         else:
             break
-    if i < n and basename(tokens[i]) in ("git", "git.exe"):
-        return tokens[i + 1:]
-    return None
+    if i < n and basename(tokens[i]) in names:
+        return i
+    return -1
+
+
+def git_args_of(tokens):
+    """If this segment is a git invocation, return the tokens after `git`."""
+    i = find_command(tokens, GIT_NAMES)
+    return tokens[i + 1:] if i >= 0 else None
+
+
+def nested_scripts(seg):
+    """Script text a shell/eval wrapper in this segment will run: [(text, is_powershell)].
+
+    Only these wrapper arguments are re-scanned as commands; any other quoted word is data.
+    """
+    i = find_command(seg, SCRIPT_RUNNERS)
+    if i < 0:
+        return []
+    name, args = basename(seg[i]), list(seg[i + 1:])
+    if name in EVALS:
+        return [(" ".join(args), False)]
+    if name in PS_EVALS:
+        return [(" ".join(args), True)]
+    if name in BASH_SHELLS:
+        j = 0
+        while j < len(args):
+            a = args[j]
+            if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", a):
+                return [(args[j + 1], False)] if j + 1 < len(args) else []
+            if a in ("-o", "+o"):
+                j += 2
+            elif a[:1] in ("-", "+"):
+                j += 1
+            else:
+                break
+        return []
+    if name in PS_SHELLS:
+        for j, a in enumerate(args):
+            low = a.lower()
+            if low.startswith("-c") and ("-command".startswith(low) or "-commandwithargs".startswith(low)):
+                return [(" ".join(args[j + 1:]), True)]
+        return []
+    for j, a in enumerate(args):  # cmd.exe
+        if a.lower() in ("/c", "/k", "/r"):
+            return [(" ".join(args[j + 1:]), True)]
+    return []
 
 
 def split_global(args):
@@ -258,13 +407,13 @@ def describe(sub, rest):
     return text if len(text) <= 160 else text[:157] + "..."
 
 
-def check_command(cmd, depth=0):
+def check_command(cmd, depth=0, ps=False):
     """Return a deny-reason string for `cmd`, or None (pass-through, no decision)."""
     if depth > MAX_DEPTH or not cmd:
         return None
     if depth == 0:
-        cmd = strip_heredocs(cmd)
-    for seg in lex(cmd):
+        cmd = strip_heredocs(cmd, ps)
+    for seg in lex(cmd, ps):
         gargs = git_args_of(seg)
         if gargs is not None:
             sub, rest = split_global(gargs)
@@ -278,11 +427,14 @@ def check_command(cmd, depth=0):
                         "work around it; stop and report back to the caller what you "
                         "needed instead." % (describe(sub, rest), why)
                     )
-        for tok in seg:
-            if re.search(r"[\s;&|()`<>]", tok):
-                why = check_command(tok, depth + 1)
-                if why:
-                    return why
+        # Only command substitutions and shell/eval wrapper scripts are re-scanned;
+        # any other quoted word (`grep "git push" docs/`) is data.
+        scripts = [(text, ps) for tok in seg for text in tok.subs]
+        scripts += nested_scripts(seg)
+        for text, sub_ps in scripts:
+            why = check_command(text, depth + 1, sub_ps)
+            if why:
+                return why
     return None
 
 
@@ -291,13 +443,13 @@ def evaluate(payload):
     if not isinstance(payload, dict) or not payload.get("agent_id"):
         return None  # main session (or unknown): never interfere
     tool = payload.get("tool_name")
-    if tool not in (None, "Bash"):
+    if tool not in (None, "Bash", "PowerShell"):
         return None
     tin = payload.get("tool_input")
     cmd = tin.get("command") if isinstance(tin, dict) else None
     if not isinstance(cmd, str):
         return None
-    return check_command(cmd)
+    return check_command(cmd, ps=(tool == "PowerShell"))
 
 
 # ---------------------------------------------------------------- selftest
@@ -350,9 +502,55 @@ PASS = [
     "git commit -F - <<'EOF'\ngit stash and git reset --hard are banned\nEOF",
     "git commit -m \"$(cat <<'EOF'\n[W2] add thing\n\ngit checkout is denied\nEOF\n)\"",
     "git",
+    # quoted words are data unless they are a shell/eval script or a command substitution
+    "grep \"git push\" docs/",
+    "grep -rn 'git stash' .",
+    "git grep \"git reset --hard\"",
+    "rg \"git push origin main\" README.md",
+    "echo \"git push\"",
+    "echo \"a; git stash\"",
+    "git log --grep=\"git push\"",
+    "git log --grep \"git checkout\"",
+    "bash script.sh \"git push\"",
+    "echo \"\\$(git stash)\"",
+    "echo '$(git stash)'",
+    "echo \"cost is \\`git push\\`\"",
+    "git commit -m \"see (git push) docs\"",
+    "git add src\\x.py",  # unquoted backslash is dropped, still not a banned form
 ]
 
 DENY = [
+    # quoted command substitutions and wrapper scripts are still scanned
+    "echo \"$(git push)\"",
+    "echo \"x `git stash` y\"",
+    "git commit -m \"$(git push origin main)\"",
+    "eval \"git push\"",
+    "eval git stash",
+    "zsh -c \"git stash\"",
+    "env FOO=1 sh -c 'git push'",
+    "timeout 5 bash -c \"git push origin main\"",
+    "bash -c \"git push\" arg0",
+    "bash -o pipefail -c 'git stash'",
+    "xargs -I{} sh -c 'git push'",
+    "powershell -NoProfile -Command \"git push\"",
+    "pwsh -c 'git stash'",
+    "cmd /c git push",
+    # bash unquoting: backslash and ANSI-C strings
+    "git \\push origin main",
+    "git pu\\sh origin main",
+    "\\git push",
+    "g\\it stash",
+    "git $'push' origin main",
+    "git $'pu\\x73h'",
+    "git $'\\160ush'",
+    "git $'\\u0070ush'",
+    "git $\"push\"",
+    "git \"pu\"sh",
+    "git reset $'--hard'",
+    "git re\\set --ha\\rd",
+    "git add \\.",
+    "git ch\\eckout main",
+    "git stash",
     "git stash",
     "git -C . stash",
     "sh -c \"git stash\"",
@@ -458,6 +656,33 @@ PAYLOADS = [
     ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {}}, False),
     ({"agent_id": "a1", "tool_name": "Bash", "tool_input": None}, False),
     ([], False),
+    # PowerShell tool: same guard, PowerShell lexing
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git push origin main"}}, True),
+    ({"tool_name": "PowerShell", "tool_input": {"command": "git push origin main"}}, False),  # main session
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git status; git push"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git status && git stash"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git status | Select-Object -First 3"}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "& git push"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "& \"C:\\Program Files\\Git\\bin\\git.exe\" push"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "C:\\Git\\bin\\git.exe stash"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git `push origin main"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git reset --hard HEAD~1"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Write-Host \"$(git push)\""}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Write-Host $(git push)"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "iex \"git push\""}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Invoke-Expression 'git stash'"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "powershell -Command \"git push\""}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "bash -c 'git push'"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git add -A"}}, True),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git add src\\a.py"}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git add .\\src\\a.py"}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Get-ChildItem C:\\Git\\bin"}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Select-String \"git push\" docs\\x.md"}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git commit -m \"fix git push docs\""}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git commit -m \"say `\"git push`\"\""}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git commit -m @'\ngit push is banned\ngit stash too\n'@"}}, False),
+    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Write-Host 'git push'"}}, False),
+    ({"agent_id": "a1", "tool_name": "Write", "tool_input": {"command": "git push"}}, False),
 ]
 
 
