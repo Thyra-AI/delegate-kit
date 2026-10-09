@@ -5,6 +5,8 @@
     python bin/partition.py plan  --map partition.map.json [--budget 100000] [--out partition.json]
     python bin/partition.py check --plan partition.json [--after --base <sha>] [--write]
     python bin/partition.py show  <cluster-id> --plan partition.json
+    python bin/partition.py worktrees --plan partition.json --layer N --root DIR [--repo .]
+    python bin/partition.py join      --plan partition.json --layer N [--repo .] [--remove-worktrees]
     python bin/partition.py auto  --wu wus.json [--repo .] [--out-dir DIR]
     python bin/partition.py calibrate --bench bench.json [...] --plan partition.json [...] [--out FILE]
     python bin/partition.py --selftest      # exits non-zero on any mismatch
@@ -20,8 +22,18 @@ config = $CLAUDE_CONFIG_DIR or ~/.claude) when it exists; explicit flags overrid
 
 wus.json is a list of
   {"id","title","kind":"build|apply|wire|verify|fix|research",
-   "seeds":{"symbols":[],"patterns":[],"paths":[],"globs":[]},
+   "seeds":{"symbols":[],"patterns":[],"paths":[],"globs":[],"additive":[]},
    "depends_on":[],"readonly":false}
+
+Isolation. Every planned file touch has a mode: `exclusive` (default) or `additive` (Markdown
+files, paths/globs a WU lists in seeds.additive (they also seed the WU), and `--additive GLOB`).
+Code files are never additive unless declared. `--isolation shared` (default) plans as always.
+`--isolation worktree` lets clusters whose only overlaps are additive touches share a layer; each
+cluster then gets a branch (dk/<run>/<Wn>) and the plan a `join` section. Run `worktrees` to create
+one git worktree per cluster of a layer (layer 0 from base_sha, later layers from the integration
+worktree's HEAD), the executers commit there, and `join` (run in the integration worktree) cherry-picks
+each cluster's new commits in order. A conflict in additive files only is resolved by a 3-way union
+(`git merge-file --union`); any other conflict aborts that cluster's pick (exit 1, nothing half-applied).
 
 Stdlib only, Python >= 3.8. Runs git with argument lists (never a shell).
 """
@@ -125,6 +137,31 @@ SIZE_TOKENS = {"small": "size_small_tokens", "medium": "size_medium_tokens", "la
 
 def nat_key(s):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
+_GLOB_CACHE = {}
+
+
+def glob_cached(g):
+    rx = _GLOB_CACHE.get(g)
+    if rx is None:
+        rx = _GLOB_CACHE[g] = glob_rx(g)
+    return rx
+
+
+def has_wild(g):
+    return any(c in g for c in "*?")
+
+
+def is_additive_path(path, globs):
+    """Additive file touch: Markdown always, anything else only when a declared glob/path covers it."""
+    if path.lower().endswith(".md"):
+        return True
+    for g in globs:
+        g = posix(g)
+        if glob_cached(g).match(path) or (not has_wild(g) and path.startswith(g.rstrip("/") + "/")):
+            return True
+    return False
 
 
 def posix(p):
@@ -430,7 +467,8 @@ def build_wu_hits(repo, wu, warns):
             h["via"].add("grep")
     files = repo.files()
     fset = set(files)
-    for p in seeds["paths"]:
+    add_seeds = [posix(x) for x in (seeds.get("additive") or [])]
+    for p in list(seeds["paths"]) + [x for x in add_seeds if not has_wild(x)]:
         p = posix(p).rstrip("/")
         if not p:
             continue
@@ -445,7 +483,7 @@ def build_wu_hits(repo, wu, warns):
         for f in found:
             h = hits.setdefault(f, {"hits": 0, "hit_lines": [], "all_lines": [], "comment_hits": 0, "via": set()})
             h["via"].add("path")
-    for g in seeds["globs"]:
+    for g in list(seeds["globs"]) + [x for x in add_seeds if has_wild(x)]:
         rx = glob_rx(g)
         found = [f for f in files if rx.match(f)]
         if not found:
@@ -713,12 +751,15 @@ def load_wus(path):
             size = str(size).strip().lower()
             if size not in SIZE_HOPS:
                 size_bad, size = str(w.get("size")), "medium"
+        wseeds = {k: [str(x) for x in (seeds.get(k) or [])] for k in ("symbols", "patterns", "paths", "globs")}
+        if seeds.get("additive"):  # only when declared, so existing maps keep their exact shape
+            wseeds["additive"] = [str(x) for x in seeds["additive"]]
         out.append({
             "id": wid, "title": str(w.get("title") or wid), "kind": kind,
             "size": size, "size_bad": size_bad,
             "readonly": bool(w.get("readonly", False)),
             "depends_on": [str(d) for d in (w.get("depends_on") or [])],
-            "seeds": {k: [str(x) for x in (seeds.get(k) or [])] for k in ("symbols", "patterns", "paths", "globs")},
+            "seeds": wseeds,
         })
     return out
 
@@ -868,6 +909,13 @@ def build_plan(m, p):
     byid = {w["id"]: w for w in wus}
     ids = sorted(byid, key=nat_key)
     finfo = m["files"]
+    isolation = p.get("isolation") or "shared"
+    wtree = isolation == "worktree"
+    gadd = [posix(g) for g in (p.get("additive") or [])]
+
+    def touch_additive(w, f):
+        """Is WU w's touch of file f additive (Markdown, or declared by the WU / --additive)?"""
+        return is_additive_path(f, list(byid[w]["seeds"].get("additive") or []) + gadd)
 
     def writes(w):
         return not (w["readonly"] or w["kind"] in ("verify", "research"))
@@ -934,8 +982,12 @@ def build_plan(m, p):
 
     for a in ids:
         for b in ids:
-            if a < b and lay[a] == lay[b] and wset[a] & wset[b]:
-                parent[find(b)] = find(a)
+            if a < b and lay[a] == lay[b]:
+                sh = wset[a] & wset[b]
+                if wtree:  # additive-only overlaps do not make a conflict edge
+                    sh = [f for f in sh if not (touch_additive(a, f) and touch_additive(b, f))]
+                if sh:
+                    parent[find(b)] = find(a)
     groups = collections.defaultdict(list)
     for w in ids:
         groups[(lay[w], find(w))].append(w)
@@ -957,6 +1009,8 @@ def build_plan(m, p):
         for f in paths:
             info = finfo.get(f)
             e = {"path": f, "hits": 0, "hit_lines": [], "lines": 0, "tokens_est": 0, "w": f in wpaths}
+            held = [w for w in g if f in fileset[w]]
+            e["mode"] = "additive" if held and all(touch_additive(w, f) for w in held) else "exclusive"
             if info is None:
                 e["planned"] = True
             else:
@@ -1003,6 +1057,7 @@ def build_plan(m, p):
             "readonly": not any(writes(byid[w]) for w in g),
             "verify": all(byid[w]["kind"] == "verify" for w in g),
             "research": not taggable,
+            "isolation": isolation,
         }
         cl.update(cost_model(ents, params, est, hops, gk, gs, g))
         clusters.append(cl)
@@ -1056,7 +1111,19 @@ def build_plan(m, p):
                           "excluded_hits": w["excluded"]["hits"],
                           "files": sorted(fileset[w["id"]])} for w in wus},
         "input_warnings": warns, "warnings": [],
+        "isolation": isolation,
     }
+    if wtree:
+        run = re.sub(r"[^0-9A-Za-z._-]", "-", str(p.get("run") or (m.get("head") or "")[:8] or "run"))
+        plan["run"] = run
+        plan["additive_globs"] = gadd
+        for c in clusters:
+            tag = (c.get("commit_tag") or "").strip("[]") or c["id"]
+            c["branch"] = "dk/%s/%s" % (run, re.sub(r"[^0-9A-Za-z._-]", "-", tag))
+        plan["join"] = {
+            "branch": "dk/%s/integration" % run,
+            "order": [c["id"] for c in sorted(clusters, key=lambda c: (c["layer"], nat_key(c["id"])))],
+        }
     plan["warnings"] = compute_warnings(plan)
     return plan
 
@@ -1170,6 +1237,10 @@ def compute_warnings(plan):
                 if not ca or not cb:
                     continue
                 sh = sorted(wpaths(ca) & wpaths(cb))
+                if sh and plan.get("isolation") == "worktree":  # additive-only overlaps join cleanly
+                    ma = {f["path"]: f.get("mode") for f in ca["files"]}
+                    mb = {f["path"]: f.get("mode") for f in cb["files"]}
+                    sh = [f for f in sh if not (ma.get(f) == "additive" and mb.get(f) == "additive")]
                 if sh:
                     flagged.add((a, b))
                     warn("PARALLEL_OVERLAP", a, "%s and %s run in parallel (L%d) but both write: %s%s" % (
@@ -1228,6 +1299,24 @@ def compute_warnings(plan):
     return out
 
 
+def additive_checker(plan):
+    """-> fn(path) -> True when every write touch of `path` in the plan is additive (a path the plan
+    does not list counts as additive only if it is Markdown or matches the plan's additive globs)."""
+    modes = collections.defaultdict(list)
+    for c in plan.get("clusters") or []:
+        for f in c.get("files") or []:
+            if f.get("w", True):
+                modes[f["path"]].append(f.get("mode") == "additive")
+    gl = [str(g) for g in (plan.get("additive_globs") or [])]
+
+    def fn(path):
+        path = posix(path)
+        if path in modes:
+            return all(modes[path])
+        return is_additive_path(path, gl)
+    return fn
+
+
 def check_after(plan, base, root):
     out = []
     rc, txt = run_git(["log", "--name-only", "--format=%x1e%H%x1f%s", "%s..HEAD" % base], root)
@@ -1278,7 +1367,10 @@ def check_after(plan, base, root):
         out.append({"code": "UNPLANNED", "cluster": tag_cluster.get(tag, ""), "msg": clip("[%s] touched %d file(s) outside every cluster: %s%s" % (
             tag, len(fs), ", ".join(fs[:3]), " +%d" % (len(fs) - 3) if len(fs) > 3 else ""))})
     pairs = collections.defaultdict(list)
+    additive = additive_checker(plan) if plan.get("isolation") == "worktree" else (lambda f: False)
     for f, tags in sorted(touched.items()):
+        if additive(f):
+            continue  # worktree isolation: additive files are unioned at join
         ts = sorted(tags)
         for i, a in enumerate(ts):
             for b in ts[i + 1:]:
@@ -1313,7 +1405,8 @@ def render(plan, warnings):
     lines.append("base %s budget %s | %d WUs -> %d clusters in %d layers | single-agent ~%s tok / %s hops%s | params: %s" % (
         (plan.get("base_sha") or "none")[:8], fmt_k(plan["budget"]), wn, len(plan["clusters"]),
         len(plan["layers"]), fmt_k(s.get("tokens", 0)), s.get("hops", "?"),
-        " / %s" % fmt_usd(s["est_cost"]) if "est_cost" in s else "", srcs))
+        " / %s" % fmt_usd(s["est_cost"]) if "est_cost" in s else "", srcs)
+        + (" | isolation: worktree (run %s)" % plan.get("run", "?") if plan.get("isolation") == "worktree" else ""))
     for c in plan["clusters"]:
         lines.append("L%d %s %s %s  %df est %s/%dh%s tests:%d%s%s  %s" % (
             c["layer"], c["id"], c.get("commit_tag") or "[no-commit]", ",".join(c["wus"]), len(c["files"]),
@@ -1356,6 +1449,11 @@ def cmd_show(a):
                 "  [read-only]" if not f.get("w", True) else ""))
     if len(c["files"]) > limit:
         print("  ... +%d more in the plan" % (len(c["files"]) - limit))
+    if c.get("branch"):
+        print("worktree: %s | branch %s" % (c.get("worktree") or "(not created yet: partition worktrees --plan <plan> --layer %d --root DIR)" % c["layer"], c["branch"]))
+        addl = [f["path"] for f in c["files"] if f.get("mode") == "additive" and f.get("w", True)]
+        if addl:
+            print("additive (appended-to files; keep edits append-only, join unions them): " + ", ".join(addl[:8]) + (" ..." if len(addl) > 8 else ""))
     print("tests: " + (" ".join(c["tests"][:12]) if c["tests"] else "none mapped") + (" ..." if len(c["tests"]) > 12 else ""))
     if tag:
         print("commit: git add <your paths> && git commit -m \"%s <what>\"" % tag)
@@ -1425,6 +1523,13 @@ def add_plan_args(p):
     p.add_argument("--price", default=None, metavar="IN,OUT,CW,CR",
                    help="$/MTok for est_cost (default %s; est treats input as cache traffic, so IN is unused)"
                    % ",".join("%g" % DEFAULTS[k] for k in ("price_in", "price_out", "price_cw", "price_cr")))
+    p.add_argument("--isolation", choices=("shared", "worktree"), default="shared",
+                   help="shared (default): one tree, overlapping clusters serialize/merge. worktree: a worktree+branch per "
+                        "cluster; clusters overlapping only on additive files share a layer and are joined by cherry-pick")
+    p.add_argument("--additive", action="append", default=None, metavar="GLOB",
+                   help="file/glob whose touches are additive (repeatable; *.md always is; only used with --isolation worktree)")
+    p.add_argument("--run", default=None, metavar="NAME",
+                   help="run id in branch names dk/<run>/<Wn> (default: first 8 chars of base_sha)")
     p.add_argument("--calibration", default=None, metavar="FILE",
                    help="calibration.json to load (default <config>/delegate-kit/calibration.json if it exists)")
     p.add_argument("--no-calibration", action="store_true", dest="no_calibration",
@@ -1490,6 +1595,9 @@ def plan_params(a):
             die("bad --price %r (want in,out,cache_write,cache_read)" % a.price)
         out.update(zip(("price_in", "price_out", "price_cw", "price_cr"), nums))
         flags += ["price_in", "price_out", "price_cw", "price_cr"]
+    out["isolation"] = getattr(a, "isolation", None) or "shared"
+    out["additive"] = [posix(g) for g in (getattr(a, "additive", None) or [])]
+    out["run"] = getattr(a, "run", None)
     out["source"] = {"calibration": cpath if calibrated else None, "calibrated": calibrated, "flags": sorted(flags)}
     if calibrated:
         out["source"].update(meta)
@@ -1742,16 +1850,243 @@ def cmd_auto(a):
     print("-> %s (+ partition.map.json)" % posix(pp))
 
 
+# ---------------------------------------------------------------- worktrees + join
+
+GIT_ENV = dict(GIT_EDITOR="true", GIT_TERMINAL_PROMPT="0")
+CONFLICT_MARK = re.compile(rb"^(?:<{7}|>{7})(?: |$)", re.M)  # '=' lines are legal Markdown underlines
+
+
+def git_run(args, cwd, binary=False):
+    """(rc, stdout, stderr) of `git args` in cwd. Text (CR stripped) unless binary. rc 127 if git is missing."""
+    cmd = ["git", "-c", "core.quotepath=off", "--no-pager"] + list(args)
+    try:
+        p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           env=dict(os.environ, **GIT_ENV))
+    except (OSError, ValueError) as e:
+        return 127, (b"" if binary else ""), str(e)
+    err = p.stderr.decode("utf-8", "replace").replace("\r", "")
+    if binary:
+        return p.returncode, p.stdout, err
+    return p.returncode, p.stdout.decode("utf-8", "replace").replace("\r", ""), err
+
+
+def same_path(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def worktree_list(root):
+    """[{"path", "branch"}] from `git worktree list --porcelain` (branch '' when detached)."""
+    rc, out, _ = git_run(["worktree", "list", "--porcelain"], root)
+    items = []
+    for ln in out.split("\n"):
+        if ln.startswith("worktree "):
+            items.append({"path": ln[len("worktree "):], "branch": ""})
+        elif ln.startswith("branch ") and items:
+            items[-1]["branch"] = ln[len("branch "):].replace("refs/heads/", "", 1)
+    return items
+
+
+def branch_exists(root, branch):
+    return git_run(["rev-parse", "--verify", "--quiet", "refs/heads/" + branch], root)[0] == 0
+
+
+def worktree_plan(path):
+    plan = read_object(path, "plan")
+    if plan.get("isolation") != "worktree" or not all(c.get("branch") for c in plan.get("clusters") or []):
+        die("%s was not planned with --isolation worktree (no cluster branches)" % path)
+    return plan
+
+
+def layer_clusters(plan, n):
+    """The clusters of layer n in join order (layer, then cluster id)."""
+    layers = plan.get("layers") or []
+    if not 0 <= n < len(layers):
+        die("--layer %d out of range (plan has %d layer(s))" % (n, len(layers)))
+    byc = {c["id"]: c for c in plan["clusters"]}
+    order = (plan.get("join") or {}).get("order") or []
+    ids = sorted(layers[n], key=lambda x: (order.index(x) if x in order else len(order), nat_key(x)))
+    return [byc[i] for i in ids if i in byc]
+
+
+def cmd_worktrees(a):
+    plan = worktree_plan(a.plan)
+    root, isgit = find_root(a.repo)
+    if not isgit:
+        die("%s is not a git repository" % a.repo)
+    cl = layer_clusters(plan, a.layer)
+    base = plan.get("base_sha") or ""
+    if a.layer == 0:
+        start = base
+        if not start:
+            die("plan has no base_sha; layer 0 worktrees need one")
+    else:
+        start = git_head(root)
+        if not start:
+            die("cannot read HEAD of %s" % root)
+        if base and git_run(["merge-base", "--is-ancestor", base, start], root)[0] != 0:
+            die("HEAD of %s (%s) does not contain base_sha %s: run from the integration worktree" % (root, start[:8], base[:8]))
+    wroot = os.path.abspath(a.root)
+    existing = worktree_list(root)
+    plan["worktree_root"] = posix(wroot)
+    byid = {c["id"]: c for c in plan["clusters"]}
+    for c in cl:
+        branch = c["branch"]
+        path = os.path.join(wroot, c["id"])
+        have = next((w for w in existing if w["branch"] == branch), None)
+        at_path = next((w for w in existing if same_path(w["path"], path)), None)
+        if have:
+            path, note = have["path"], "exists"
+        elif at_path:
+            die("%s is already a worktree on branch %s, not %s" % (path, at_path["branch"] or "(detached)", branch))
+        elif os.path.exists(path) and os.listdir(path):
+            die("%s exists and is not a worktree" % path)
+        else:
+            os.makedirs(wroot, exist_ok=True)
+            if branch_exists(root, branch):
+                rc, _, err = git_run(["worktree", "add", path, branch], root)
+            else:
+                rc, _, err = git_run(["worktree", "add", "-b", branch, path, start], root)
+            if rc != 0:
+                die("git worktree add failed for %s: %s" % (c["id"], err.strip()[:300]))
+            existing = worktree_list(root)
+            note = "created"
+        byid[c["id"]]["worktree"] = posix(path)
+        print("%s %s %s (%s)" % (c["id"], posix(path), branch, note))
+    write_json(a.plan, plan)
+    return 0
+
+
+def union_resolve(root, path, tmp):
+    """Resolve conflicted `path` (index stages 1-3) by a 3-way union and `git add` it.
+    -> error text, or None on success."""
+    stages = {}
+    for st in (1, 2, 3):
+        rc, data, _ = git_run(["show", ":%d:%s" % (st, path)], root, binary=True)
+        if rc == 0:
+            stages[st] = data
+    if 2 not in stages or 3 not in stages:
+        return "%s: added/deleted on one side, cannot union" % path
+    files = []
+    for st in (2, 1, 3):  # merge-file order: ours, base, theirs (no base stage = both sides added it)
+        fp = os.path.join(tmp, "stage%d" % st)
+        with open(fp, "wb") as f:
+            f.write(stages.get(st, b""))
+        files.append(fp)
+    rc, merged, err = git_run(["merge-file", "--union", "-p"] + files, root, binary=True)
+    if rc < 0 or rc > 127:
+        return "%s: git merge-file failed (%s)" % (path, err.strip()[:120])
+    if CONFLICT_MARK.search(merged) and not any(CONFLICT_MARK.search(s) for s in stages.values()):
+        return "%s: conflict markers remain after union" % path
+    with open(os.path.join(root, path), "wb") as f:
+        f.write(merged)
+    rc, _, err = git_run(["add", "--", path], root)
+    return None if rc == 0 else "%s: git add failed (%s)" % (path, err.strip()[:120])
+
+
+def unmerged_files(root):
+    rc, out, _ = git_run(["ls-files", "-u", "-z"], root)
+    names = []
+    for rec in out.split("\0"):
+        if "\t" in rec:
+            n = rec.split("\t", 1)[1]
+            if n not in names:
+                names.append(n)
+    return names
+
+
+def pick_cluster(root, c, additive, tmp):
+    """Cherry-pick the commits of cluster c's branch that HEAD does not have yet, in one sequence so
+    `cherry-pick --abort` rolls the whole cluster back. -> (n_picked, n_files_unioned, error or None)."""
+    branch = c["branch"]
+    if not branch_exists(root, branch):
+        return 0, 0, "branch %s does not exist (run partition worktrees for layer %d)" % (branch, c["layer"])
+    rc, mb, _ = git_run(["merge-base", "HEAD", branch], root)
+    if rc != 0:
+        return 0, 0, "branch %s shares no history with HEAD" % branch
+    rc, out, err = git_run(["rev-list", "--reverse", "--topo-order", "--no-merges", "HEAD.." + branch], root)
+    if rc != 0:
+        return 0, 0, "cannot list %s commits: %s" % (branch, err.strip()[:200])
+    rc, log, _ = git_run(["log", "--format=%B", "%s..HEAD" % mb.strip()], root)
+    done = set(re.findall(r"\(cherry picked from commit ([0-9a-f]{40})\)", log))  # -x ledger: join is re-runnable
+    shas = [x for x in out.split() if x not in done]
+    if not shas:
+        return 0, 0, None
+    resolved = 0
+    rc, _, err = git_run(["cherry-pick", "-x"] + shas, root)
+    for _ in range(len(shas) + 2):
+        if rc == 0:
+            return len(shas), resolved, None
+        if git_run(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"], root)[0] != 0:
+            git_run(["cherry-pick", "--abort"], root)
+            return 0, 0, "cherry-pick failed: %s" % err.strip()[:300]
+        files = unmerged_files(root)
+        bad = [f for f in files if not additive(f)]
+        if bad or not files:
+            git_run(["cherry-pick", "--abort"], root)
+            return 0, 0, "conflict in non-additive file(s): %s" % (", ".join(bad[:6]) or "(none listed)")
+        for f in files:
+            why = union_resolve(root, f, tmp)
+            if why:
+                git_run(["cherry-pick", "--abort"], root)
+                return 0, 0, "additive conflict not resolvable: " + why
+            resolved += 1
+        if git_run(["diff", "--cached", "--quiet"], root)[0] == 0:  # the union left nothing to commit
+            rc, _, err = git_run(["cherry-pick", "--skip"], root)
+        else:
+            rc, _, err = git_run(["cherry-pick", "--continue"], root)
+    git_run(["cherry-pick", "--abort"], root)
+    return 0, 0, "cherry-pick did not converge"
+
+
+def cmd_join(a):
+    import tempfile
+    plan = worktree_plan(a.plan)
+    root, isgit = find_root(a.repo)
+    if not isgit:
+        die("%s is not a git repository" % a.repo)
+    cl = layer_clusters(plan, a.layer)
+    if git_run(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"], root)[0] == 0:
+        die("a cherry-pick is already in progress in %s" % root)
+    if git_run(["status", "--porcelain", "--untracked-files=no"], root)[1].strip():
+        die("%s has uncommitted tracked changes; join needs a clean integration worktree" % root)
+    cur = git_run(["symbolic-ref", "--short", "-q", "HEAD"], root)[1].strip()
+    if cur and cur in [c["branch"] for c in plan["clusters"]]:
+        die("%s is on cluster branch %s: run join in the integration worktree" % (root, cur))
+    additive = additive_checker(plan)
+    joined = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for c in cl:
+            n, nres, err = pick_cluster(root, c, additive, tmp)
+            if err:
+                print("join: cluster %s (%s) NOT joined: %s" % (c["id"], c["branch"], err))
+                print("join: integration branch left clean at %s (joined before this: %s). Hand back: resolve %s "
+                      "by hand or re-plan it as one cluster; re-running join skips what is already joined." % (
+                          git_head(root)[:8], ", ".join(joined) or "none", c["id"]))
+                return 1
+            joined.append(c["id"])
+            print("join: %s %s: %s" % (c["id"], c["branch"], "nothing new" if not n else "%d commit(s) picked%s" % (
+                n, ", %d additive file(s) unioned" % nres if nres else "")))
+    if getattr(a, "remove_worktrees", False):
+        live = worktree_list(root)
+        for c in cl:
+            w = next((w for w in live if w["branch"] == c["branch"] and not same_path(w["path"], root)), None)
+            if w:
+                rc, _, err = git_run(["worktree", "remove", w["path"]], root)
+                print("join: removed worktree %s" % posix(w["path"]) if rc == 0 else
+                      "join: could not remove %s (%s)" % (posix(w["path"]), err.strip()[:120]))
+    return 0
+
+
 # ---------------------------------------------------------------- selftest
 
 
-def _map_wu(wid, kind, files, depends_on=(), readonly=False, size="medium"):
+def _map_wu(wid, kind, files, depends_on=(), readonly=False, size="medium", additive=()):
     """A wus entry of a partition map: `files` is {path: hits} (or a list of planned paths)."""
     planned = list(files) if isinstance(files, (list, tuple)) else []
     hits = {} if planned else {f: {"hits": n, "hit_lines": [], "comment_hits": 0, "via": ["grep"]}
                                 for f, n in files.items()}
     return {"id": wid, "title": wid, "kind": kind, "size": size, "readonly": readonly,
-            "depends_on": list(depends_on), "seeds": {}, "planned": planned,
+            "depends_on": list(depends_on), "seeds": {"additive": list(additive)} if additive else {}, "planned": planned,
             "excluded": {"hits": 0, "files": 0}, "hits": hits}
 
 
@@ -1763,6 +2098,7 @@ def _map_file(lang):
 def selftest():
     import contextlib
     import io
+    import shutil
     import tempfile
 
     cases = []  # (label, got, want)
@@ -2027,6 +2363,235 @@ def selftest():
         eq("graph ok", ((r or {}).get("community"), (r or {}).get("coupling"), err),
            ({"a.py": 1, "b.py": 2}, [["a.py", "b.py", 1.0]], ""))
 
+    # ---- isolation: additive touches, layering, plan fields (pure planning, no git)
+    def iso_map(wus, names):
+        return {"head": "h" * 40, "files": {n: _map_file("docs" if n.endswith(".md") else "python") for n in names},
+                "wus": wus}
+
+    names = ("x.py", "y.py", "doc.md", "reg.txt", "c.json", "d.json")
+    mi = iso_map([_map_wu("W1", "apply", {"x.py": 1, "doc.md": 1}), _map_wu("W2", "apply", {"y.py": 1, "doc.md": 1})], names)
+    pw = build_plan(mi, dict(P, isolation="worktree", run="t"))
+    ps = build_plan(mi, dict(P))
+    eq("iso worktree: *.md overlap keeps clusters apart in one layer",
+       ([c["wus"] for c in pw["clusters"]], pw["layers"]), ([["W1"], ["W2"]], [["C1", "C2"]]))
+    eq("iso shared: *.md overlap merges as before", [c["wus"] for c in ps["clusters"]], [["W1", "W2"]])
+    eq("iso worktree: md touch is additive, code exclusive",
+       {f["path"]: f["mode"] for f in pw["clusters"][0]["files"]}, {"x.py": "exclusive", "doc.md": "additive"})
+    eq("iso worktree: no PARALLEL_OVERLAP for additive-only overlap",
+       [w["code"] for w in pw["warnings"] if w["code"] == "PARALLEL_OVERLAP"], [])
+    eq("iso shared: overlap warning only when clusters really share a layer", ps["layers"], [["C1"]])
+    eq("iso shared plan carries no worktree fields",
+       (ps["isolation"], "join" in ps, any("branch" in c for c in ps["clusters"]), ps["clusters"][0]["isolation"]),
+       ("shared", False, False, "shared"))
+    eq("iso worktree: branches + join order",
+       ([c["branch"] for c in pw["clusters"]], pw["join"]), (["dk/t/W1", "dk/t/W2"], {"branch": "dk/t/integration", "order": ["C1", "C2"]}))
+    eq("iso render marks worktree mode only", (" | isolation: worktree (run t)" in render(pw, []).split("\n")[0],
+                                                "isolation:" in render(ps, []).split("\n")[0]), (True, False))
+    both = iso_map([_map_wu("W1", "apply", {"x.py": 1}), _map_wu("W2", "apply", {"x.py": 1, "y.py": 1})], names)
+    eq("iso worktree: exclusive code overlap still merges",
+       [c["wus"] for c in build_plan(both, dict(P, isolation="worktree"))["clusters"]], [["W1", "W2"]])
+    eq("iso worktree: --additive glob covers code-like files",
+       len(build_plan(iso_map([_map_wu("W1", "apply", {"c.json": 1}), _map_wu("W2", "apply", {"c.json": 1})], names),
+                      dict(P, isolation="worktree", additive=["*.json"]))["clusters"]), 2)
+    eq("iso worktree: without it the config file is exclusive",
+       len(build_plan(iso_map([_map_wu("W1", "apply", {"c.json": 1}), _map_wu("W2", "apply", {"c.json": 1})], names),
+                      dict(P, isolation="worktree"))["clusters"]), 1)
+    eq("iso worktree: seeds.additive from both WUs",
+       len(build_plan(iso_map([_map_wu("W1", "apply", {"reg.txt": 1}, additive=["reg.txt"]),
+                               _map_wu("W2", "apply", {"reg.txt": 1}, additive=["reg.txt"])], names),
+                      dict(P, isolation="worktree"))["clusters"]), 2)
+    eq("iso worktree: declared by one WU only is still exclusive",
+       len(build_plan(iso_map([_map_wu("W1", "apply", {"reg.txt": 1}, additive=["reg.txt"]),
+                               _map_wu("W2", "apply", {"reg.txt": 1})], names),
+                      dict(P, isolation="worktree"))["clusters"]), 1)
+    eq("is_additive_path", [is_additive_path(x, ["reg.txt", "gen/*.json", "dir"]) for x in
+                            ("a/B.MD", "x.py", "reg.txt", "gen/a.json", "gen/sub/a.json", "dir/f.py")],
+       [True, False, True, True, False, True])
+    with tempfile.TemporaryDirectory() as d:
+        # seeds.additive both seeds the WU and is recorded in the map
+        with open(os.path.join(d, "reg.txt"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+        wf = os.path.join(d, "wus.json")
+        write_json(wf, [{"id": "W1", "seeds": {"additive": ["reg.txt", "new/*.md"]}}])
+        loaded = load_wus(wf)
+        hits, _, planned = build_wu_hits(Repo(d, False), loaded[0], [])
+        eq("seeds.additive seeds like paths/globs", (loaded[0]["seeds"]["additive"], sorted(hits), planned),
+           (["reg.txt", "new/*.md"], ["reg.txt"], ["new/*.md"]))
+        write_json(wf, [{"id": "W1", "seeds": {"paths": ["reg.txt"]}}])
+        eq("map shape unchanged without seeds.additive", "additive" in load_wus(wf)[0]["seeds"], False)
+        # CLI: --isolation / --additive / --run reach the plan; the default stays shared
+        mp = os.path.join(d, "m.json")
+        write_json(mp, mi)
+        for extra, want in (([], ("shared", None)), (["--isolation", "worktree", "--additive", "*.json", "--additive", "g/*", "--run", "r1"],
+                                                      ("worktree", ["*.json", "g/*"]))):
+            out = os.path.join(d, "p.json")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["plan", "--map", mp, "--out", out, "--no-calibration"] + extra)
+            pl = read_json(out, "plan")
+            eq("cli plan %s" % (extra[:2],), (pl["isolation"], pl.get("additive_globs")), want)
+        eq("cli plan --run", pl["join"]["branch"], "dk/r1/integration")
+        eq("cli plan rejects --isolation bogus", quiet(main, ["plan", "--map", mp, "--isolation", "bogus"])[0], ("exit", 2))
+        # show prints the branch (and the worktree once `worktrees` recorded it)
+        write_json(out, pl)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_show(argparse.Namespace(cluster="C1", plan=out))
+        eq("show: branch before worktrees", "worktree: (not created yet" in buf.getvalue() and "branch dk/r1/W1" in buf.getvalue(), True)
+        pl["clusters"][0]["worktree"] = "/w/C1"
+        write_json(out, pl)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_show(argparse.Namespace(cluster="C1", plan=out))
+        eq("show: worktree path + branch", "worktree: /w/C1 | branch dk/r1/W1" in buf.getvalue(), True)
+        eq("worktrees refuses a shared-mode plan",
+           quiet(cmd_worktrees, argparse.Namespace(plan=mp, layer=0, root=d, repo=d))[0], ("exit", 2))
+
+    # ---- worktrees + join in temporary git repos
+    if shutil.which("git") is None:
+        print("partition selftest: git not found, worktree/join cases skipped")
+    else:
+        def git(cwd, *args):
+            rc, out, err = git_run(list(args), cwd)
+            if rc != 0:
+                raise RuntimeError("git %s failed in %s: %s" % (" ".join(args), cwd, err.strip()))
+            return out.strip()
+
+        def put(cwd, name, text, append=False):
+            p = os.path.join(cwd, name)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "a" if append else "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+
+        def commit(cwd, msg, *paths):
+            git(cwd, "add", "--", *paths)
+            git(cwd, "commit", "-q", "-m", msg, "--", *paths)
+
+        def new_repo(base, files):
+            os.makedirs(base)
+            git(base, "init", "-q")
+            for k, v in (("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false"),
+                         ("core.autocrlf", "false"), ("core.safecrlf", "false")):
+                git(base, "config", k, v)
+            for n, t in files.items():
+                put(base, n, t)
+            commit(base, "init", *files)
+            return git(base, "rev-parse", "HEAD")
+
+        def run_cmd(fn, **kw):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    rc = fn(argparse.Namespace(**kw))
+                except SystemExit as e:
+                    rc = ("exit", e.code)
+            return rc, buf.getvalue()
+
+        base_files = {"README.md": "# Doc\n", "registry.txt": "base\n", "a.py": "a\n", "b.py": "b\n", "c.py": "c\n"}
+        with tempfile.TemporaryDirectory() as d:
+            integ = os.path.join(d, "int")
+            head = new_repo(integ, base_files)
+            wts = os.path.join(d, "wt")
+            mg = iso_map([_map_wu("W1", "apply", {"a.py": 1, "README.md": 1, "registry.txt": 1}, additive=["registry.txt"]),
+                          _map_wu("W2", "apply", {"b.py": 1, "README.md": 1, "registry.txt": 1}, additive=["registry.txt"]),
+                          _map_wu("W3", "apply", {"c.py": 1}, depends_on=["W1"])],
+                         tuple(base_files))
+            mg["head"] = head
+            plan = build_plan(mg, dict(P, isolation="worktree", run="t"))
+            pf = os.path.join(d, "plan.json")
+            write_json(pf, plan)
+            eq("join fixture layers", plan["layers"], [["C1", "C2"], ["C3"]])
+            eq("join fixture: registry and README are additive for both",
+               {f["path"]: f["mode"] for f in plan["clusters"][0]["files"]},
+               {"a.py": "exclusive", "README.md": "additive", "registry.txt": "additive"})
+            rc, out = run_cmd(cmd_worktrees, plan=pf, layer=0, root=wts, repo=integ)
+            eq("worktrees layer 0: rc + created", (rc, out.count("(created)")), (0, 2))
+            c1, c2 = os.path.join(wts, "C1"), os.path.join(wts, "C2")
+            eq("worktrees layer 0 branch from base_sha",
+               (git(c1, "rev-parse", "HEAD"), git(c2, "rev-parse", "HEAD"), git(c1, "symbolic-ref", "--short", "HEAD")),
+               (head, head, "dk/t/W1"))
+            rc, out = run_cmd(cmd_worktrees, plan=pf, layer=0, root=wts, repo=integ)
+            eq("worktrees is idempotent", (rc, out.count("(exists)"), len(worktree_list(integ))), (0, 2, 3))
+            eq("worktrees records the paths in the plan",
+               [c.get("worktree") for c in read_json(pf, "plan")["clusters"][:2]], [posix(c1), posix(c2)])
+            eq("worktrees refuses a layer out of range", run_cmd(cmd_worktrees, plan=pf, layer=9, root=wts, repo=integ)[0], ("exit", 2))
+            # both clusters append to the same Markdown file and to the WU-declared registry
+            put(c1, "README.md", "from w1\n", append=True)
+            put(c1, "registry.txt", "reg w1\n", append=True)
+            put(c1, "a.py", "a1\n", append=True)
+            commit(c1, "[W1] first", "README.md", "registry.txt", "a.py")
+            put(c2, "README.md", "from w2\n", append=True)
+            put(c2, "registry.txt", "reg w2\n", append=True)
+            commit(c2, "[W2] first", "README.md", "registry.txt")
+            put(c2, "b.py", "b2\n", append=True)
+            commit(c2, "[W2] second", "b.py")
+            before = git(integ, "rev-parse", "HEAD")
+            eq("join: a cluster branch is refused as the integration worktree",
+               run_cmd(cmd_join, plan=pf, layer=0, repo=c1, remove_worktrees=False)[0], ("exit", 2))
+            rc, out = run_cmd(cmd_join, plan=pf, layer=0, repo=integ, remove_worktrees=True)
+            eq("join: additive overlap unions cleanly", (rc, "unioned" in out), (0, True))
+            with open(os.path.join(integ, "README.md"), encoding="utf-8") as f:
+                readme = f.read()
+            with open(os.path.join(integ, "registry.txt"), encoding="utf-8") as f:
+                reg = f.read()
+            eq("join: union keeps base + both appends",
+               (readme.split(), reg.split(), "<<<<" in readme + reg or ">>>>" in readme + reg),
+               (["#", "Doc", "from", "w1", "from", "w2"], ["base", "reg", "w1", "reg", "w2"], False))
+            eq("join: linear history, no merge commits, tags kept",
+               (git(integ, "rev-list", "--merges", "--count", before + "..HEAD"),
+                git(integ, "log", "--reverse", "--format=%s", before + "..HEAD").split("\n")),
+               ("0", ["[W1] first", "[W2] first", "[W2] second"]))
+            eq("join: clean tree, no pick left behind",
+               (git(integ, "status", "--porcelain", "--untracked-files=no"),
+                git_run(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"], integ)[0] != 0), ("", True))
+            eq("join --remove-worktrees", (os.path.exists(c1), os.path.exists(c2), len(worktree_list(integ))), (False, False, 1))
+            after = git(integ, "rev-parse", "HEAD")
+            rc, out = run_cmd(cmd_join, plan=pf, layer=0, repo=integ, remove_worktrees=False)
+            eq("join is re-runnable (nothing new)", (rc, git(integ, "rev-parse", "HEAD") == after, "nothing new" in out), (0, True, True))
+            # tags still attribute after the join; additive collisions are not reported in worktree mode
+            eq("check --after after a join", check_after(plan, head, integ), ([], 3, 3))
+            eq("check --after in shared mode would flag the shared README",
+               [w["code"] for w in check_after(dict(plan, isolation="shared"), head, integ)[0]], ["COLLISION"])
+            # layer 1 branches from the integration tip
+            rc, out = run_cmd(cmd_worktrees, plan=pf, layer=1, root=wts, repo=integ)
+            c3 = os.path.join(wts, "C3")
+            eq("worktrees layer 1 branches from the integration tip", (rc, git(c3, "rev-parse", "HEAD") == after), (0, True))
+            put(c3, "c.py", "c3\n", append=True)
+            commit(c3, "[W3] c", "c.py")
+            rc, out = run_cmd(cmd_join, plan=pf, layer=1, repo=integ, remove_worktrees=False)
+            eq("join layer 1", (rc, git(integ, "log", "--reverse", "--format=%s", head + "..HEAD").split("\n")),
+               (0, ["[W1] first", "[W2] first", "[W2] second", "[W3] c"]))
+            eq("check --after for the whole run", check_after(plan, head, integ), ([], 4, 4))
+
+        with tempfile.TemporaryDirectory() as d:
+            integ = os.path.join(d, "int")
+            head = new_repo(integ, dict(base_files, **{"shared.txt": "one\ntwo\nthree\n"}))
+            mx = iso_map([_map_wu("W1", "apply", {"a.py": 1}), _map_wu("W2", "apply", {"b.py": 1})], tuple(base_files))
+            mx["head"] = head
+            plan = build_plan(mx, dict(P, isolation="worktree", run="x"))
+            pf = os.path.join(d, "plan.json")
+            write_json(pf, plan)
+            run_cmd(cmd_worktrees, plan=pf, layer=0, root=os.path.join(d, "wt"), repo=integ)
+            c1, c2 = os.path.join(d, "wt", "C1"), os.path.join(d, "wt", "C2")
+            put(c1, "shared.txt", "ONE\ntwo\nthree\n")
+            put(c1, "README.md", "w1\n", append=True)
+            commit(c1, "[W1] edit shared", "shared.txt", "README.md")
+            put(c2, "b.py", "b2\n", append=True)
+            commit(c2, "[W2] b", "b.py")
+            put(c2, "shared.txt", "uno\ntwo\nthree\n")
+            put(c2, "README.md", "w2\n", append=True)
+            commit(c2, "[W2] edit shared", "shared.txt", "README.md")
+            rc, out = run_cmd(cmd_join, plan=pf, layer=0, repo=integ, remove_worktrees=True)
+            tip = git(integ, "rev-parse", "HEAD")
+            eq("join: exclusive conflict hands back (exit 1, names cluster + file)",
+               (rc, "cluster C2" in out, "shared.txt" in out, "README.md" in out.split("non-additive")[1]), (1, True, True, False))
+            eq("join: conflict leaves the integration branch clean and the cluster unjoined",
+               (git(integ, "status", "--porcelain", "--untracked-files=no"),
+                git_run(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"], integ)[0] != 0,
+                git(integ, "log", "--format=%s", head + "..HEAD").split("\n"),
+                git(integ, "show", "HEAD:b.py")), ("", True, ["[W1] edit shared"], "b"))
+            eq("join: nothing removed after a failed join", os.path.isdir(c2), True)
+            eq("join: tip is exactly the cluster before the conflict", git(integ, "rev-parse", "HEAD"), tip)
+
     bad = 0
     for label, got, want in cases:
         if got != want:
@@ -2067,6 +2632,19 @@ def main(argv=None):
     p.add_argument("cluster")
     p.add_argument("--plan", required=True)
     p.set_defaults(fn=cmd_show)
+    p = sub.add_parser("worktrees", help="create (idempotently) one worktree + branch per cluster of a layer")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--layer", type=int, required=True)
+    p.add_argument("--root", required=True, help="directory that will hold one worktree per cluster (<root>/<Cn>)")
+    p.add_argument("--repo", default=".", help="integration worktree (default .); layers > 0 branch from its HEAD")
+    p.set_defaults(fn=cmd_worktrees)
+    p = sub.add_parser("join", help="cherry-pick a layer's cluster branches into the integration worktree (run there)")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--layer", type=int, required=True)
+    p.add_argument("--repo", default=".", help="integration worktree (default .)")
+    p.add_argument("--remove-worktrees", action="store_true", dest="remove_worktrees",
+                   help="after a successful join, `git worktree remove` the layer's cluster worktrees")
+    p.set_defaults(fn=cmd_join)
     p = sub.add_parser("auto", help="map + plan + check; writes partition.map.json and partition.json")
     add_map_args(p)
     add_plan_args(p)
@@ -2077,10 +2655,10 @@ def main(argv=None):
         ap.print_help()
         return 2
     try:
-        a.fn(a)
+        rc = a.fn(a)
     except KeyboardInterrupt:
         return 130
-    return 0
+    return rc if isinstance(rc, int) else 0
 
 
 if __name__ == "__main__":

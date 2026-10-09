@@ -391,6 +391,10 @@ def check_scripts_and_guard():
         if r.returncode != 0:
             failures.append("bin/%s.py --help exited %d:\n%s"
                             % (name, r.returncode, r.stderr.strip()))
+    for sub in ("worktrees", "join"):  # parallel-isolation subcommands (selftests run via partition --selftest)
+        r = run_py(ROOT / "bin" / "partition.py", sub, "--help")
+        if r.returncode != 0:
+            failures.append("partition.py %s --help exited %d:\n%s" % (sub, r.returncode, r.stderr.strip()))
     guard = ROOT / "hooks" / "git_guard.py"
     if not guard.is_file():
         failures.append("hooks/git_guard.py is missing")
