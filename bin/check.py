@@ -345,6 +345,8 @@ def check_install():
             failures.append("compose did not install meter.py")
         elif meter_got.read_bytes() != meter_src.read_bytes():
             failures.append("installed meter.py differs from hooks/meter.py")
+        if (dest / "meter_selftest.py").exists():
+            failures.append("compose installed meter_selftest.py (dev/CI only; runtime gets meter.py alone)")
         exec_cmds = check_executer_budget(Path(home))
         for name in ("card.py", "card.md"):
             src, got = ROOT / "hooks" / name, dest / name
