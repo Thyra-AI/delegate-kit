@@ -26,7 +26,7 @@ Two properties matter enough to guard:
    real ~/.claude) installs byte-equal copies of bin/{partition,bench,squash}.py plus a
    `dk` launcher, and that launcher runs. Each script answers `--help`.
 
-5. **The self-tests pass.** `bin/partition.py --selftest` and `bin/bench.py --selftest` pass.
+5. **The self-tests pass.** `bin/partition.py --selftest`, `bin/bench.py --selftest` and `hooks/meter.py --selftest` pass.
 
 6. **The git guard is wired.** `hooks/git_guard.py --selftest` passes, and
    `hooks/hooks.json` parses and points at a `hooks/git_guard.py` that exists.
@@ -98,6 +98,25 @@ def check_install():
                 failures.append("compose did not install %s" % got.name)
             elif got.read_bytes() != src.read_bytes():
                 failures.append("installed %s differs from bin/%s" % (got.name, src.name))
+        meter_src, meter_got = ROOT / "hooks" / "meter.py", dest / "meter.py"
+        if not meter_got.is_file():
+            failures.append("compose did not install meter.py")
+        elif meter_got.read_bytes() != meter_src.read_bytes():
+            failures.append("installed meter.py differs from hooks/meter.py")
+        cfg = Path(home) / "delegate-kit" / "config.json"
+        try:
+            defaults = json.loads(cfg.read_text(encoding="utf-8"))
+            if not (defaults.get("card", {}).get("enabled") is True
+                    and defaults["meter"]["main"]["delegate_at"] == 200000
+                    and defaults["meter"]["executer"]["stop_tokens"] == 150000):
+                failures.append("compose wrote config.json with unexpected defaults")
+        except (OSError, ValueError, KeyError) as exc:
+            failures.append("compose did not write a valid config.json: %s" % exc)
+        else:
+            cfg.write_text('{"meter": {"main": {"enabled": false}}}', encoding="utf-8")
+            r = run_py(ROOT / "bin" / "compose.py", "--home", home, "--enable", "")
+            if r.returncode != 0 or cfg.read_text(encoding="utf-8") != '{"meter": {"main": {"enabled": false}}}':
+                failures.append("compose overwrote an existing config.json")
         dk = dest / "dk"
         if not dk.is_file():
             failures.append("compose did not write the dk launcher")
@@ -132,6 +151,13 @@ def check_scripts_and_guard():
         if r.returncode != 0:
             failures.append("%s.py --selftest failed:\n%s"
                             % (name, (r.stdout + r.stderr).strip()))
+    meter = ROOT / "hooks" / "meter.py"
+    if not meter.is_file():
+        failures.append("hooks/meter.py is missing")
+    else:
+        r = run_py(meter, "--selftest")
+        if r.returncode != 0:
+            failures.append("meter.py --selftest failed:\n%s" % (r.stdout + r.stderr).strip())
     manifest = ROOT / "hooks" / "hooks.json"
     try:
         text = manifest.read_text(encoding="utf-8")
