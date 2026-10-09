@@ -58,7 +58,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = ROOT / "templates" / "agents"
 EXPECTED_AGENTS = 8
-SCRIPTS = ("partition", "bench", "squash")
+SCRIPTS = ("partition", "bench", "squash", "events")
 # things whose value would differ between two composes
 VOLATILE = re.compile(r"\{\{|\$\{|%\(|\buuid\b|\bdatetime\b|\btime\.time\b|<timestamp>", re.I)
 
@@ -450,6 +450,53 @@ def check_serena_fragment():
         failures.append("integrations/serena.md grants the initial_instructions tool")
 
 
+def check_events():
+    """`dk events` summarises a synthetic events.jsonl, directly and through the installed launcher."""
+    rows = [{"ts": "2026-10-01T10:00:00Z", "role": "main", "level": "delegate", "context": 210000, "calls": 3},
+            {"ts": "2026-10-02T10:00:00Z", "role": "executer", "level": "L1", "context": 1, "calls": 40},
+            {"ts": "2026-10-02T11:00:00Z", "role": "executer", "level": "L2", "context": 2, "calls": 60}]
+
+    def verify(r, label):
+        try:
+            out = json.loads(r.stdout)
+        except ValueError:
+            failures.append("%s did not print JSON (rc %d): %s" % (label, r.returncode, (r.stdout + r.stderr).strip()[:300]))
+            return
+        if (r.returncode != 0 or out.get("total") != 3 or len(out.get("last", [])) != 2
+                or out.get("by_role") != {"executer": 2, "main": 1}
+                or out.get("by_day", {}).get("2026-10-02") != 2 or out.get("skipped") != 1):
+            failures.append("%s summarised the synthetic log wrongly: %s" % (label, r.stdout.strip()[:300]))
+
+    with tempfile.TemporaryDirectory() as d:
+        log = Path(d) / "events.jsonl"
+        log.write_text("\n".join(json.dumps(x) for x in rows) + "\ngarbage\n", encoding="utf-8")
+        verify(run_py(ROOT / "bin" / "events.py", "--file", log, "--json", "--last", "2"), "events.py --json")
+        r = run_py(ROOT / "bin" / "events.py", "--file", log, "--json", "--since", "2026-10-02")
+        try:
+            since_total = json.loads(r.stdout).get("total")
+        except ValueError:
+            since_total = None
+        if r.returncode != 0 or since_total != 2:
+            failures.append("events.py --since did not filter by day: %s" % (r.stdout + r.stderr).strip()[:300])
+        if run_py(ROOT / "bin" / "events.py", "--since", "yesterday").returncode != 2:
+            failures.append("events.py accepted a malformed --since")
+        if run_py(ROOT / "bin" / "events.py", "--selftest").returncode != 0:
+            failures.append("events.py --selftest failed")
+        sh = shutil.which("sh")
+        if not sh:
+            return  # already recorded as skipped by check_install
+        with tempfile.TemporaryDirectory() as home:
+            if run_py(ROOT / "bin" / "compose.py", "--home", home, "--enable", "").returncode != 0:
+                return  # compose failure is reported by check_install
+            state = Path(home) / "delegate-kit" / "state"
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "events.jsonl").write_text(log.read_text(encoding="utf-8"), encoding="utf-8")
+            dk = Path(home) / "delegate-kit" / "bin" / "dk"
+            r = subprocess.run([sh, dk.as_posix(), "events", "--json", "--last", "2"],
+                               capture_output=True, text=True)
+            verify(r, "`sh dk events --json`")
+
+
 def main():
     enable = all_integrations()
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
@@ -515,6 +562,7 @@ def main():
     check_install()
     check_scripts_and_guard()
     check_card_and_main_hooks()
+    check_events()
 
     if failures:
         print("FAIL (%d)" % len(failures))

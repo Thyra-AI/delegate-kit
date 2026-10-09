@@ -28,7 +28,7 @@ STARVED = frozenset({"director", "thinker", "super-thinker"})
 STAMP_NAME = ".delegate-kit-stamp.json"
 # Scripts agents reach through the `dk` launcher, installed to <config>/delegate-kit/bin/.
 # Copied when present in the plugin's bin/, so a missing one never blocks a compose.
-SCRIPTS = ("partition", "bench", "squash")
+SCRIPTS = ("partition", "bench", "squash", "events")
 # Hook scripts (plugin hooks/), installed beside them so frontmatter hooks and plugin hooks (via
 # `dk hook <card|meter>`) can point at a stable path. Not `dk` commands.
 HOOK_SCRIPTS = ("meter", "card")
