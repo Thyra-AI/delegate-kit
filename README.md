@@ -363,6 +363,15 @@ A `SIZE-HANDBACK` report (done / remaining with `path:line` anchors / commits / 
 
 The partition script is advisory. It exists so the planning agent spends few tokens, and nothing stops an agent from reading or editing anywhere.
 
+**Parallel clusters with worktree isolation.** By default parallel clusters must not share write files. When they overlap only on *additive* files (docs, or a registry such as a test list or script list), plan with `--isolation worktree` instead: `dk partition auto --wu wus.json --out-dir DIR --isolation worktree --run NAME [--additive GLOB]`. `*.md` is always additive; a code file is additive only if a unit declares it in `seeds.additive` or you pass `--additive`. The plan then carries a branch `dk/NAME/<Wn>` per cluster and a join plan onto `dk/NAME/integration`. Per layer:
+
+| Command | What it does |
+|---|---|
+| `dk partition worktrees --plan P --layer N --root DIR` | Creates one worktree and branch per cluster (layer 0 from `base_sha`, later layers from the integration HEAD). Idempotent; `show <Cn>` prints the cluster's worktree. Each executer works only in its own. |
+| `dk partition join --plan P --layer N [--remove-worktrees]` | Cherry-picks each cluster's commits (`-x`) in order into the integration worktree and union-resolves conflicts confined to additive files. A conflict on any exclusive file aborts that cluster and exits 1; hand it back as a new `fix` unit. |
+
+History stays linear, so `check --after` and `squash` work as before. Leave README and skill edits to one docs unit after the join, so build units never fight over them.
+
 **Tag-and-squash commits.** Each agent commits its own work with the tag of its piece: `git add <explicit paths>`, then `git commit -m "[W3] what changed"`. One commit or many is fine, because the tag is what groups them. When the run is over, `dk squash` folds every tag into a single commit, starting from `base_sha`. It refuses on a dirty tree, never touches anything already pushed, and on a conflict it aborts and leaves history exactly as it was. The result is one commit per piece of work, with no coordination between parallel agents.
 
 **The git guard.** The plugin ships a `PreToolUse` hook (`hooks/git_guard.py`) that denies destructive git commands run through a subagent's `Bash` or `PowerShell` tool:

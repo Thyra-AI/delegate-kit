@@ -29,6 +29,7 @@ You turn an inline list of work units (WUs) into a schedule: which clusters of w
    - `SINGLE_AGENT_OK` means the whole job fits one executer. Report that verdict rather than forcing a split.
    - Review findings arrive as `fix` WUs and get re-partitioned like any other work, so they are clustered by write-set instead of bundled into a few big fix agents. The measured cost of bundling: four fix agents at 186-299k peak cost $20 of an $85 session.
    - A large audit arrives as several `research` WUs. Keep them separate, one slice each; they don't need to be serialized with anything.
+   - **Isolation.** Default `shared`: parallel clusters must not share write files. Choose `--isolation worktree` (add `--run NAME`) when parallel clusters would overlap only on additive files: docs (`*.md` is always additive), or registries such as a test list or script list. Declare those in the WU as `seeds.additive` (globs) or pass `--additive GLOB`; a code file is never additive unless declared. Any overlap on a non-additive file still means one cluster (or serial layers), in either mode. Worktree mode gives every cluster a branch `dk/<run>/<Wn>` and a `join` plan; build WUs should leave README/SKILL edits to one docs WU in a later layer.
 5. **Record `base_sha`.** `git rev-parse HEAD`, taken before any executer runs. It goes in `schedule.json`; the end-of-run squash starts from it.
 6. **Write `schedule.json`.** Start from `partition.json` (same schema), hand-edit clusters, `layers` and `files` for your decisions, keep each cluster's `commit_tag` (`[Wn]`) unique, then re-run:
    `sh ~/.claude/delegate-kit/bin/dk partition check --plan <dir>/schedule.json`
@@ -41,6 +42,7 @@ Report only what a later reader needs: the shape of the schedule, the warnings s
 - **Header:** path to `schedule.json`, `base_sha`, single-agent verdict (`SINGLE_AGENT_OK` or not, with its estimate).
 - **Layers:** per layer, which clusters run in parallel.
 - **Per cluster:** id, title, WU ids, commit tag, file count, `est_tokens`/hops, and the cost estimate the script prints per cluster (est $ and cumulative input). A `research` cluster has no commit tag.
+- **Worktree mode:** the isolation chosen and why, and the steps for the caller per layer: `dk partition worktrees --plan <schedule.json> --layer N --root DIR` before spawning, `dk partition join --plan <schedule.json> --layer N [--remove-worktrees]` after (exit 1 = exclusive conflict, becomes a `fix` WU).
 - **Warnings:** those still standing after the final `check`, one line each, with why they're acceptable.
 - **Struck or added files:** counts only, with the paths that matter.
 - **Open questions:** anything the caller must decide, such as a cyclic `depends_on` or seeds too generic to trust.
