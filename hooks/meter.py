@@ -90,7 +90,7 @@ def state_path(key):
 def prune_state(d):
     cutoff = time.time() - PRUNE_DAYS * 86400
     for n in os.listdir(d):
-        if n.endswith(".json"):
+        if n.endswith(".json") or n.endswith(".tmp"):  # .tmp: orphans of a crashed save_state
             p = os.path.join(d, n)
             try:
                 if os.path.getmtime(p) < cutoff:
@@ -117,6 +117,13 @@ def load_state(key, retries=1):
     return None
 
 
+def _unlink_quiet(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def save_state(key, st):
     d = state_dir()
     fresh = not os.path.exists(state_path(key))
@@ -133,8 +140,12 @@ def save_state(key, st):
             return
         except PermissionError:
             if attempt == 3:
+                _unlink_quiet(tmp)
                 raise
             time.sleep(0.05)
+        except BaseException:
+            _unlink_quiet(tmp)
+            raise
 
 
 def log_event(payload, role, level, context, calls):
@@ -291,6 +302,9 @@ def _main_decide(st, ctx, cfg):
     return None
 
 
+MAIN_NUDGE_EVENTS = ("UserPromptSubmit", "PostToolUse", "PreToolUse")
+
+
 def main_nudge(payload):
     """Main-agent ladder for one hook payload. Returns the nudge text or None. Never raises."""
     try:
@@ -308,6 +322,8 @@ def main_nudge(payload):
             if payload.get("source") == "compact":
                 save_state(key, {"levels": {"delegate": False, "compact": False, "repeat": 0}, "calls": 0})
             return None
+        if event not in MAIN_NUDGE_EVENTS:
+            return None  # only events whose nudge can be delivered may load or persist a crossed level
         st = load_state(key) or {"calls": 0}
         if event == "PostToolUse":
             st["calls"] = st.get("calls", 0) + 1
@@ -683,7 +699,10 @@ def selftest():
 
     def events():
         p = os.path.join(sd, "events.jsonl")
-        return [json.loads(l) for l in open(p)] if os.path.isfile(p) else []
+        if not os.path.isfile(p):
+            return []
+        with open(p, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh]
 
     # --- context reader, cross-checked against bin/bench.py's transcript model
     bench = None
@@ -1007,6 +1026,24 @@ def selftest():
             ok = False
         check("main_nudge never raises on %r" % (junk,), ok)
 
+    # --- main_nudge: only UserPromptSubmit/PostToolUse/PreToolUse may load or persist state
+    wipe()
+    mkey = "main-" + msid
+    for ev in ("Stop", "SubagentStop", "Notification", "PreCompact", "SessionEnd", "", None, 7):
+        before = os.listdir(sd) if os.path.isdir(sd) else []
+        pl = mpl([asst("z", 0, 0, 460000)])
+        pl["hook_event_name"] = ev
+        check("main_nudge: event %r returns None" % (ev,), main_nudge(pl) is None)
+        check("main_nudge: event %r writes no state" % (ev,),
+              (os.listdir(sd) if os.path.isdir(sd) else []) == before and not os.path.exists(state_path(mkey)))
+    check("main_nudge: SessionStart (startup) writes no state",
+          main_nudge(mpl([asst("z", 0, 0, 460000)], ev="SessionStart", source="startup")) is None
+          and not os.path.exists(state_path(mkey)))
+    for ev in ("UserPromptSubmit", "PostToolUse", "PreToolUse"):
+        wipe()
+        check("main_nudge: %s still nudges and persists" % ev,
+              isinstance(main_nudge(mpl([asst("z", 0, 0, 460000)], ev=ev)), str) and os.path.exists(state_path(mkey)))
+
     # --- cleanup + prune
     wipe()
     post(10000, n=2)
@@ -1019,6 +1056,31 @@ def selftest():
     save_state("fresh-agent", {})
     check("state older than 7 days is pruned on new state", not os.path.exists(old) and
           os.path.exists(state_path("fresh-agent")))
+    orphan, young = state_path("o1") + ".999.tmp", state_path("o2") + ".998.tmp"
+    for f in (orphan, young):
+        with open(f, "w") as fh:
+            fh.write("{")
+    os.utime(orphan, (time.time() - 8 * 86400,) * 2)
+    save_state("fresh-two", {})
+    check("orphaned .tmp older than 7 days is pruned, young .tmp kept",
+          not os.path.exists(orphan) and os.path.exists(young))
+    real_replace, leftovers = os.replace, []
+
+    def deny_replace(a, b):
+        leftovers.append(a)
+        raise PermissionError("locked")
+
+    os.replace = deny_replace
+    try:
+        try:
+            save_state("locked-one", {})
+            raised = False
+        except PermissionError:
+            raised = True
+    finally:
+        os.replace = real_replace
+    check("save_state: failed replace raises and removes its temp file",
+          raised and len(leftovers) == 4 and not os.path.exists(leftovers[0]), leftovers)
 
     # --- config + kill switches
     def cfgwrite(obj):

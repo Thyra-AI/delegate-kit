@@ -18,6 +18,8 @@ serialized FIRST; the meter runs inside try/except and can never change a deny o
 
     python git_guard.py --selftest      # exits non-zero on any mismatch
 """
+import base64
+import binascii
 import json
 import os
 import re
@@ -69,6 +71,10 @@ PS_SHELLS = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
 CMD_SHELLS = {"cmd", "cmd.exe"}
 EVALS = {"eval"}
 PS_EVALS = {"iex", "invoke-expression"}
+ENCODED_DENY = (
+    "git_guard: an undecodable PowerShell -EncodedCommand is blocked for subagents (it cannot be checked). "
+    "Run the command directly instead, or stop and report back to the caller what you needed."
+)
 SCRIPT_RUNNERS = BASH_SHELLS | PS_SHELLS | CMD_SHELLS | EVALS | PS_EVALS
 HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z0-9_]+)\2")
 PS_HERESTRING = re.compile(r"@(['\"])[ \t]*\r?\n.*?\r?\n\1@", re.S)
@@ -300,10 +306,21 @@ def git_args_of(tokens):
     return tokens[i + 1:] if i >= 0 else None
 
 
+def decode_encoded(b64):
+    """The script in a PowerShell -EncodedCommand argument (base64 of UTF-16LE), or None if undecodable."""
+    try:
+        raw = re.sub(r"\s+", "", b64)
+        raw += "=" * (-len(raw) % 4)
+        return base64.b64decode(raw, validate=True).decode("utf-16-le")
+    except (binascii.Error, ValueError, UnicodeError):
+        return None
+
+
 def nested_scripts(seg):
     """Script text a shell/eval wrapper in this segment will run: [(text, is_powershell)].
 
     Only these wrapper arguments are re-scanned as commands; any other quoted word is data.
+    A text of None marks a PowerShell -EncodedCommand that could not be decoded.
     """
     i = find_command(seg, SCRIPT_RUNNERS)
     if i < 0:
@@ -331,6 +348,9 @@ def nested_scripts(seg):
             low = a.lower()
             if low.startswith("-c") and ("-command".startswith(low) or "-commandwithargs".startswith(low)):
                 return [(" ".join(args[j + 1:]), True)]
+            # -EncodedCommand: any prefix of it (-e, -en, -enc...) plus the -ec alias
+            if low == "-ec" or (len(low) >= 2 and "-encodedcommand".startswith(low)):
+                return [(decode_encoded(args[j + 1]), True)] if j + 1 < len(args) else []
         return []
     for j, a in enumerate(args):  # cmd.exe
         if a.lower() in ("/c", "/k", "/r"):
@@ -432,6 +452,8 @@ def check_command(cmd, depth=0, ps=False):
         scripts = [(text, ps) for tok in seg for text in tok.subs]
         scripts += nested_scripts(seg)
         for text, sub_ps in scripts:
+            if text is None:
+                return ENCODED_DENY
             why = check_command(text, depth + 1, sub_ps)
             if why:
                 return why
@@ -644,6 +666,16 @@ DENY = [
     "if true; then git reset --hard; fi",
 ]
 
+def _enc(script):
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+def _ps(cmd, tool="PowerShell", **kw):
+    d = {"tool_name": tool, "tool_input": {"command": cmd}}
+    d.update(kw)
+    return d
+
+
 PAYLOADS = [
     # (payload, expect_deny)
     ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "git -C . stash"}}, True),
@@ -683,6 +715,26 @@ PAYLOADS = [
     ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git commit -m @'\ngit push is banned\ngit stash too\n'@"}}, False),
     ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Write-Host 'git push'"}}, False),
     ({"agent_id": "a1", "tool_name": "Write", "tool_input": {"command": "git push"}}, False),
+    # PowerShell -EncodedCommand (base64 UTF-16LE): decoded and rescanned; undecodable is denied
+    (_ps("powershell -EncodedCommand " + _enc("git push origin main"), agent_id="a1"), True),
+    (_ps("pwsh -enc " + _enc("git stash"), agent_id="a1"), True),
+    (_ps("powershell.exe -NoProfile -ec " + _enc("git push"), agent_id="a1"), True),
+    (_ps("powershell -e " + _enc("git reset --hard"), agent_id="a1"), True),
+    (_ps("POWERSHELL -ENCODEDC " + _enc("& git push"), agent_id="a1"), True),
+    (_ps("powershell -enc " + _enc("Write-Host $(git push)"), agent_id="a1"), True),
+    (_ps("powershell -enc " + _enc("powershell -Command 'git push'"), agent_id="a1"), True),
+    (_ps("powershell -enc " + _enc("git push"), tool="Bash", agent_id="a1"), True),
+    (_ps("powershell -enc " + _enc("git push").rstrip("="), agent_id="a1"), True),  # missing padding
+    (_ps("powershell -enc !!notbase64!!", agent_id="a1"), True),
+    (_ps("powershell -enc QQ==", agent_id="a1"), True),  # decodes to one byte: not UTF-16LE
+    (_ps("powershell -enc " + base64.b64encode(b"\xff\xfe\xfe\xdc").decode(), agent_id="a1"), True),  # lone surrogate
+    (_ps("powershell -enc " + _enc("git status"), agent_id="a1"), False),
+    (_ps("powershell -NoProfile -EncodedCommand " + _enc("Get-ChildItem; git log -5"), agent_id="a1"), False),
+    (_ps("powershell -enc " + _enc("Write-Host 'git push'"), agent_id="a1"), False),
+    (_ps("powershell -enc", agent_id="a1"), False),  # no value: nothing to run
+    (_ps("powershell -ExecutionPolicy Bypass -File x.ps1", agent_id="a1"), False),
+    (_ps("powershell -enc " + _enc("git push")), False),  # main session
+    (_ps("powershell -enc !!notbase64!!"), False),  # main session
 ]
 
 
