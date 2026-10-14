@@ -1,8 +1,8 @@
 ---
 name: run
 description: Hand a whole multi-stage objective to the director — the orchestration agent that spawns the rest of the fleet and returns one verified result. Use for objectives with several delegation hops (investigate → decide → build → verify) that you don't need to steer step by step. Add --plan-only to get the plan and delegation map without changing anything.
-argument-hint: "[--plan-only] <objective>"
-allowed-tools: Task(director), Agent(director), Bash(git rev-parse --show-toplevel)
+argument-hint: "[--plan-only] [--model fable|opus] <objective>"
+allowed-tools: Task(director), Agent(director), Bash(git rev-parse --show-toplevel), AskUserQuestion, Read
 ---
 
 # delegate-kit — run
@@ -25,6 +25,8 @@ session, say so and suggest they start as the director instead.
   approach it would take and the delegation map, and stops. Strip the flag before using the rest
   as the objective.
 - No flag — full execution, including code changes and commits by the executers it spawns.
+- **`--model fable|opus`** — the model the director runs on for this one run. Strip it from the
+  objective too. Any other value: ask rather than guess.
 
 If the objective is empty after stripping flags, ask what it is rather than spawning anything.
 
@@ -42,16 +44,23 @@ Also check `.claude/agents/director.md` or `~/.claude/agents/director.md` exists
 `/delegate-kit:setup` hasn't been run on this machine (or predates the director) — say that
 rather than falling back to a generic agent.
 
-## 3. Establish the run root
+## 3. Pick the director's model
+
+If `--model` was given, use it. Otherwise ask with `AskUserQuestion` (single-select): **run the
+director on `fable` or `opus`?** Read the `model:` line of the `director.md` you just found and list
+that one first, marked as the installed default; the other second. One question, nothing else in
+the call. Tell the user, once, that `/delegate-kit:setup` changes the installed default.
+
+## 4. Establish the run root
 
 Get the absolute project root (`git rev-parse --show-toplevel`, falling back to the cwd). The
 director has no tools and cannot work this out for itself — every brief it writes depends on
 being handed it.
 
-## 4. Spawn the director
+## 5. Spawn the director
 
-One `Task`/`Agent` call, `subagent_type: director`, **no explicit `model`** (that would override
-its pin). The brief must contain:
+One `Task`/`Agent` call, `subagent_type: director`, with `model` set to the choice from step 3
+(`fable` or `opus`). The brief must contain:
 
 - **The objective**, verbatim from the user, plus any context from this conversation the director
   would otherwise have to rediscover — decisions already made, constraints, things already tried.
@@ -69,7 +78,7 @@ its pin). The brief must contain:
 Don't pad the brief. The director's job is to find things out; yours is to state the objective
 precisely and hand it the pointers you already have.
 
-## 5. Relay the result
+## 6. Relay the result
 
 The director returns one consolidated report — outcome, decisions, changes, verification, open
 items, ledger path. Pass it through faithfully:

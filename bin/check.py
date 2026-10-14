@@ -44,6 +44,10 @@ Two properties matter enough to guard:
    installed launcher is stale (a launcher that exits 2, as an older `dk` without `hook` does: a
    UserPromptSubmit hook exiting 2 would erase the user's prompt). With CLAUDE_CONFIG_DIR unset, the
    launcher's `hook` branch puts state next to the launcher, not under the user's home.
+
+9. **The director model is the user's pick, and it sticks.** A plain compose pins the director to
+   `fable`; `--director-model opus` pins it to `opus`; a later compose into the same directory with
+   no flag keeps `opus` (re-running setup to change integrations must not reset it).
 """
 import json
 import math
@@ -80,6 +84,31 @@ def compose_into(outdir, enable=None):
     if r.returncode != 0:
         failures.append("compose.py exited %d:\n%s" % (r.returncode, r.stderr.strip()))
     return sorted(Path(outdir).glob("*.md"))
+
+
+def director_model(outdir):
+    text = (Path(outdir) / "director.md").read_text(encoding="utf-8")
+    m = re.search(r"^model:\s*(\S+)\s*$", text.split("---", 2)[1], re.M)
+    return m.group(1) if m else None
+
+
+def check_director_model():
+    compose = [sys.executable, str(ROOT / "bin" / "compose.py")]
+    with tempfile.TemporaryDirectory() as d:
+        steps = [([], "fable"), (["--director-model", "opus"], "opus"), ([], "opus"),
+                 (["--director-model", "fable"], "fable")]
+        for extra, want in steps:
+            r = subprocess.run(compose + ["--out", d] + extra, capture_output=True, text=True)
+            if r.returncode != 0:
+                failures.append("compose.py %s exited %d: %s" % (extra, r.returncode, r.stderr.strip()))
+                return
+            got = director_model(d)
+            if got != want:
+                failures.append("compose %s pinned the director to %r, expected %r" % (extra or "(no flag)", got, want))
+                return
+        r = subprocess.run(compose + ["--out", d, "--director-model", "haiku"], capture_output=True, text=True)
+        if r.returncode == 0:
+            failures.append("compose accepted --director-model haiku; only fable/opus are allowed")
 
 
 def run_py(*args):
@@ -692,6 +721,7 @@ def main():
             )
 
     check_serena_fragment()
+    check_director_model()
     check_install()
     check_scripts_and_guard()
     check_bench_summary()
@@ -711,7 +741,7 @@ def main():
             return 1
         print("WARNING: passing with skipped checks (--allow-skip); this is NOT a full pass")
     print("ok: composition is deterministic; every agent has a real tools: grant; "
-          "partition tooling installs and runs; git guard wired; card and main-meter hooks wired")
+          "partition tooling installs and runs; git guard wired; card and main-meter hooks wired; director model selectable and sticky")
     return 0
 
 

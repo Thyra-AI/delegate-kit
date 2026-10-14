@@ -454,15 +454,19 @@ than silently dropping your whole grant.
   `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`. Nothing else in the kit can recurse: the other seven declare
   explicit `tools:` lists with no spawn tool.
 - **Models** are pinned per agent in `templates/agents/*.md` frontmatter (`model:`). Change any to a
-  model you have access to — e.g. if you don't have `fable`, set `super-thinker` (and `director`) to
-  `opus`; the director's design rests on its tool starvation, not on the specific pin. `thinker`
+  model you have access to — e.g. if you don't have `fable`, set `super-thinker` to `opus`. The
+  `director` is the exception: its pin is chosen at setup (`fable` or `opus`, via
+  `compose.py --director-model`, sticky across re-runs), and `/delegate-kit:run` asks which to use
+  per run (or takes `--model fable|opus`); its design rests on its tool starvation, not on the
+  specific pin. `thinker`
   is pinned to the explicit id `claude-opus-5-5` at `effort: medium`; `researcher` and `executer`
   to `claude-sonnet-5-5` at `effort: high`. If an id differs in your account, update it to the
   equivalent id rather than letting it fall back to a heavier model. Re-run `/delegate-kit:setup`
   after editing a template.
 - **Don't pass `model` when spawning.** An explicit `model` on the Agent call overrides the frontmatter
   pin and only accepts coarse aliases (`sonnet`/`opus`/`haiku`/`fable`), so it can't even express
-  `claude-sonnet-5-5` — it silently swaps in a different model.
+  `claude-sonnet-5-5` — it silently swaps in a different model. (`/delegate-kit:run` passing
+  `fable`/`opus` to the director is the one deliberate exception: those aliases are its pin anyway.)
 - **There is no way to give an agent no tools**, and the obvious encodings do the opposite of what
   they look like. Measured on Claude Code 2.1.263:
 

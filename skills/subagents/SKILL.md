@@ -13,7 +13,7 @@ If a `subagent_type` below doesn't exist, `/delegate-kit:setup` hasn't been run 
 
 | Agent | Model | Tools | Use it for |
 |-------|-------|-------|------------|
-| **director** | fable | spawning agents, and nothing else | The agent you *talk to*, not one you spawn: `claude --agent director` makes it the session. It delegates every read, edit, command and commit to the agents below and decides from their reports. |
+| **director** | fable or opus (your pick at setup) | spawning agents, and nothing else | The agent you *talk to*, not one you spawn: `claude --agent director` makes it the session. It delegates every read, edit, command and commit to the agents below and decides from their reports. |
 | **thinker** | opus 5.5 (medium effort) | no file access | Deep reasoning over context you already have: analysis, trade-offs, planning, debugging-by-reasoning, hard decisions. |
 | **super-thinker** | fable | no file access | Same as thinker, but the top tier — reach for it when the reasoning is hardest or the call is highest-stakes and you want maximum depth. |
 | **researcher** | sonnet 5.5 (high effort) | Read/Grep/Glob/Bash **+ WebSearch/WebFetch** (+ Serena & graphify when installed) | Understanding how something works — the full flow through the system and the nodes involved — **and** research whose answer lives outside the repo: external docs, APIs, specs, changelogs, the web. |

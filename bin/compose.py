@@ -26,6 +26,9 @@ MARKER = "<!-- delegate-kit:integrations -->"
 # Agents whose whole value is their lack of tools; no fragment may widen them.
 STARVED = frozenset({"director", "thinker", "super-thinker"})
 STAMP_NAME = ".delegate-kit-stamp.json"
+# Models the director may be pinned to (`--director-model`). Both are top-tier; which one
+# judges better changes with each release, so it's the user's pick, not ours.
+DIRECTOR_MODELS = ("fable", "opus")
 # Scripts agents reach through the `dk` launcher, installed to <config>/delegate-kit/bin/.
 # Copied when present in the plugin's bin/, so a missing one never blocks a compose.
 SCRIPTS = ("partition", "bench", "squash", "events")
@@ -124,8 +127,15 @@ def discover(dirs: list[Path]) -> dict[str, dict]:
 # ------------------------------------------------------------------------ composing
 
 
-def compose(template_text: str, agent: str, fragments: list[dict], hooks: dict | None = None) -> str:
-    """`hooks` maps agent name -> the one-line `hooks:` frontmatter value to append (see meter_hooks)."""
+def compose(
+    template_text: str,
+    agent: str,
+    fragments: list[dict],
+    hooks: dict | None = None,
+    models: dict | None = None,
+) -> str:
+    """`hooks` maps agent name -> the one-line `hooks:` frontmatter value to append (see meter_hooks).
+    `models` maps agent name -> a `model:` value replacing the template's pin."""
     fm, body = split_frontmatter(template_text)
     applicable = [f for f in fragments if not f["agents"] or agent in f["agents"]]
 
@@ -216,6 +226,8 @@ def compose(template_text: str, agent: str, fragments: list[dict], hooks: dict |
                     f"Give the template an explicit minimal grant, e.g. `tools: Skill`."
                 )
             value = ", ".join(tools)
+        elif key == "model" and models and agent in models:
+            value = models[agent]
         lines.append(f"{key}: {value}")
     if hooks and agent in hooks:
         lines.append(f"hooks: {hooks[agent]}")
@@ -438,6 +450,12 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=default_out)
     ap.add_argument("--enable", default="", help="comma-separated fragment names ('' = none)")
     ap.add_argument("--list", action="store_true", help="print discoverable fragments as JSON")
+    ap.add_argument(
+        "--director-model",
+        choices=DIRECTOR_MODELS,
+        default=None,
+        help="model the director is pinned to (default: the previous compose's choice, else fable)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-backup", action="store_true")
     args = ap.parse_args()
@@ -473,6 +491,19 @@ def main() -> int:
         return 2
     enabled = [fragments[name] for name in requested]
 
+    # Sticky: a re-run of setup (say, to add an integration) must not quietly put the
+    # director back on the default. Only an explicit flag changes the pin.
+    director_model = args.director_model
+    if director_model is None:
+        try:
+            prior = json.loads((args.out / STAMP_NAME).read_text(encoding="utf-8"))
+            director_model = prior.get("director_model")
+        except (OSError, ValueError, AttributeError):
+            director_model = None
+    if director_model not in DIRECTOR_MODELS:
+        director_model = "fable"
+    models = {"director": director_model}
+
     templates = sorted(args.templates.glob("*.md"))
     if not templates:
         print(f"error: no templates in {args.templates}", file=sys.stderr)
@@ -503,7 +534,7 @@ def main() -> int:
     for template in templates:
         agent = template.stem
         try:
-            text = compose(template.read_text(encoding="utf-8"), agent, enabled, hooks)
+            text = compose(template.read_text(encoding="utf-8"), agent, enabled, hooks, models)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             print("error: nothing written; no agent definition was changed.", file=sys.stderr)
@@ -534,6 +565,7 @@ def main() -> int:
         print("note: --out given without --home; scripts and the dk launcher were not installed", file=sys.stderr)
 
     if args.dry_run:
+        print(f"director model: {director_model}")
         return 0
 
     (args.out / STAMP_NAME).write_text(
@@ -542,6 +574,7 @@ def main() -> int:
                 "generated_by": "delegate-kit",
                 "plugin_root": str(here),
                 "enabled": requested,
+                "director_model": director_model,
                 "files": stamp_files,
             },
             indent=2,
@@ -552,6 +585,7 @@ def main() -> int:
         print(f"\nprevious versions backed up to {backup}")
     print(f"\n{len(written)} agent definition(s) written to {args.out}")
     print(f"enabled integrations: {', '.join(requested) or '(none)'}")
+    print(f"director model: {director_model}")
     if launcher:
         print(f"launcher: {posix(launcher)}")
         if not args.home and config != Path.home() / ".claude":

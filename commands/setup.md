@@ -73,13 +73,20 @@ have.
 If nothing is discoverable at all, say so and offer to compose with no integrations — that
 is a valid, working setup, just built-ins only.
 
+In the same `AskUserQuestion` call, ask a second, single-select question: **which model the
+`director` runs on** — `fable` or `opus`. Both are top-tier; which judges better shifts between
+releases, so this is the user's call. If `~/.claude/agents/.delegate-kit-stamp.json` exists, read its
+`director_model` and list that one first as the current choice; otherwise list `fable` first.
+This pin is also what director mode (`/delegate-kit:director on`) runs the whole session on.
+
 ## 4. Compose
 
 ```
-<py> "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --enable <comma,separated,names>
+<py> "${CLAUDE_PLUGIN_ROOT}/bin/compose.py" --enable <comma,separated,names> --director-model <fable|opus>
 ```
 
-Pass `--enable ""` for none. Add `--dry-run` first if the user wants to see what changes
+Pass `--enable ""` for none. `--director-model` is sticky: left off, the previous compose's
+choice is kept (fable on a first install). Add `--dry-run` first if the user wants to see what changes
 before it lands. Existing files in `~/.claude/agents` are backed up to
 `~/.claude/agents/.delegate-kit-backup` before being overwritten.
 
@@ -93,7 +100,8 @@ Tell the user:
 
 - which agents were written, and which integrations each ended up with (the script prints
   this per file — `thinker`, `super-thinker` and `director` take none by design: the first two
-  have no file access, and the director's only tool is spawning the others);
+  have no file access, and the director's only tool is spawning the others), and which model the
+  director is pinned to;
 - that the partition tooling was installed too: `partition.py`, `bench.py` and `squash.py`, plus a
   `dk` launcher, in `~/.claude/delegate-kit/bin/` (under `$CLAUDE_CONFIG_DIR` if that is set).
   Compose prints the launcher path; repeat it to the user. Agents call it as
@@ -141,7 +149,7 @@ Be straight about the trade before turning it on, because it is easy to be surpr
   file tools, so switching itself off means delegating the edit.
 
 Suggest it for projects with real multi-step work in them. For a project where the user mostly asks
-one-off questions, the director is a Fable-priced middleman — say so instead of pushing it.
+one-off questions, the director is a top-model-priced middleman — say so instead of pushing it.
 
 Also check `.gitignore` covers `.delegate-kit/` (the run ledger). If it does not, offer to add it.
 
