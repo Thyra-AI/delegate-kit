@@ -17,13 +17,20 @@ accepts a partition.json that an agent has hand-edited (the cluster `files`
 lists are the source of truth there: to merge two clusters, merge their `wus`
 and `files` lists; to strike a false hit, delete its entry).
 
-`plan` and `auto` read <config>/delegate-kit/calibration.json (written by `calibrate`,
-config = $CLAUDE_CONFIG_DIR or ~/.claude) when it exists; explicit flags override it.
+`plan` and `auto` read $KIMCHI_DK_DIR/calibration.json (written by `calibrate`; default
+$KIMCHI_DK_DIR = ~/.local/share/kimchi/delegate-kit) when it exists; explicit flags override it.
 
 wus.json is a list of
   {"id","title","kind":"build|apply|wire|verify|fix|research",
    "seeds":{"symbols":[],"patterns":[],"paths":[],"globs":[],"additive":[]},
    "depends_on":[],"readonly":false}
+Optional fields: "size":"small|medium|large", and "delivers":"<deliverable>" — the reviewable
+unit this WU ships in (one branch/MR per deliverable, stacked ship-oldest-first; WUs sharing a
+name form one deliverable). With "delivers" nowhere, the planner auto-buckets clusters by
+directory prefix (AUTO_DELIVERABLES: review the split) or, when there is no clean split, emits
+one implicit "main" deliverable. The plan gains a "deliverables" section: an ordered list of
+{name, clusters, tags, branch, base, layers, primary_files} — each deliverable's base is the
+previous deliverable's branch; the first bases on base_sha.
 
 Isolation. Every planned file touch has a mode: `exclusive` (default) or `additive` (Markdown
 files, paths/globs a WU lists in seeds.additive (they also seed the WU), and `--additive GLOB`).
@@ -696,14 +703,17 @@ def build_map(wus, repo, args):
             warns.append({"code": "INPUT", "cluster": "", "msg": clip("%s: unknown kind %r (want %s), treated as apply" % (wu["id"], wu["kind"], "|".join(KINDS)))})
         if wu.get("size_bad") is not None:
             warns.append({"code": "INPUT", "cluster": "", "msg": clip("%s: invalid size %r (want small|medium|large), using medium" % (wu["id"], wu["size_bad"]))})
-        wu_out.append({
+        entry = {
             "id": wu["id"], "title": wu["title"], "kind": wu["kind"], "size": wu.get("size", "medium"),
             "readonly": wu["readonly"],
             "depends_on": wu["depends_on"], "seeds": wu["seeds"], "planned": planned,
             "excluded": {"hits": excluded["hits"], "files": len(excluded["files"])},
             "hits": {p: {"hits": h["hits"], "hit_lines": h["hit_lines"], "comment_hits": h["comment_hits"],
                          "via": sorted(h["via"])} for p, h in sorted(hits.items())},
-        })
+        }
+        if wu.get("delivers"):
+            entry["delivers"] = wu["delivers"]  # map entries keep their exact shape when undeclared
+        wu_out.append(entry)
     for p in sorted(lines_by_file.keys() | set(p for w in wu_out for p in w["hits"])):
         st = file_static(repo, p, sorted(lines_by_file.get(p, ())), args.bpt)
         if st:
@@ -754,12 +764,15 @@ def load_wus(path):
         wseeds = {k: [str(x) for x in (seeds.get(k) or [])] for k in ("symbols", "patterns", "paths", "globs")}
         if seeds.get("additive"):  # only when declared, so existing maps keep their exact shape
             wseeds["additive"] = [str(x) for x in seeds["additive"]]
+        delivers = w.get("delivers")
+        delivers = _slug(delivers) if delivers is not None and str(delivers).strip() else None
         out.append({
             "id": wid, "title": str(w.get("title") or wid), "kind": kind,
             "size": size, "size_bad": size_bad,
             "readonly": bool(w.get("readonly", False)),
             "depends_on": [str(d) for d in (w.get("depends_on") or [])],
             "seeds": wseeds,
+            **({"delivers": delivers} if delivers else {}),
         })
     return out
 
@@ -1113,6 +1126,9 @@ def build_plan(m, p):
         "input_warnings": warns, "warnings": [],
         "isolation": isolation,
     }
+    for w in wus:
+        if w.get("delivers"):
+            plan["wus"][w["id"]]["delivers"] = w["delivers"]
     if wtree:
         run = re.sub(r"[^0-9A-Za-z._-]", "-", str(p.get("run") or (m.get("head") or "")[:8] or "run"))
         plan["run"] = run
@@ -1126,6 +1142,76 @@ def build_plan(m, p):
         }
     plan["warnings"] = compute_warnings(plan)
     return plan
+
+
+# ---------------------------------------------------------------- deliverables
+
+DELIVER_OVERSIZE_FILES = 8  # aggregated primary files per deliverable that triggers DELIVERABLE_OVERSIZE
+
+
+def _slug(s):
+    return re.sub(r"[^0-9a-z._-]+", "-", str(s).strip().lower()).strip("-._") or "x"
+
+
+def _auto_prefix(c):
+    """Nominal layer/slice label of a cluster for auto-bucketing: the most common parent-
+    directory segment of its files (kimchi-studio-shaped: 'renderer', 'main', 'e2e');
+    root-level files count as 'root'."""
+    cnt = collections.Counter()
+    for f in c.get("files") or []:
+        parts = f["path"].strip("/").split("/")
+        cnt[parts[-2] if len(parts) > 1 else "root"] += 1
+    return cnt.most_common(1)[0][0] if cnt else "root"
+
+
+def compute_deliverables(plan):
+    """Review units: groups of clusters a human reviews and merges together, stacked
+    ship-oldest-first (deliverable i bases on deliverable i-1's branch; the first bases on
+    base_sha). Naming precedence: an explicit WU 'delivers' name (conflicting names inside one
+    cluster -> sorted-first wins, conflict reported) > auto directory-prefix bucket. When no WU
+    declares anything and the buckets don't split cleanly (<2 commit-bearing clusters, or one
+    prefix total), everything lands in one implicit 'main' deliverable — zero ceremony.
+    Returns (deliverables, conflicts{cluster_id: [declared names]}, auto_fired)."""
+    clusters = [c for c in plan.get("clusters") or [] if c.get("commit_tag")]
+    wus = plan.get("wus") or {}
+    conflicts, names = {}, {}
+    for c in clusters:
+        declared = sorted({_slug(n) for n in ((wus.get(w) or {}).get("delivers") for w in c["wus"]) if n})
+        if len(declared) > 1:
+            conflicts[c["id"]] = declared
+        names[c["id"]] = declared[0] if declared else None
+    explicit = any(names.values())
+    for c in clusters:
+        if names[c["id"]] is None:
+            names[c["id"]] = _auto_prefix(c)
+    if not explicit and (len(clusters) < 2 or len(set(names.values())) < 2):
+        names = {c["id"]: "main" for c in clusters}
+        auto_fired = False
+    else:
+        auto_fired = not explicit
+    groups, seen = [], {}
+    for c in sorted(clusters, key=lambda c: (c.get("layer", 0), nat_key(names[c["id"]]))):
+        n = names[c["id"]]
+        g = seen.get(n)
+        if g is None:
+            g = seen[n] = {"name": n, "clusters": [], "tags": [], "layers": set(),
+                           "files": collections.Counter()}
+            groups.append(g)
+        g["clusters"].append(c["id"])
+        g["tags"].append(c["commit_tag"].strip("[]"))
+        g["layers"].add(c.get("layer", 0))
+        for f in c.get("files") or []:
+            if f.get("w", True):
+                g["files"][f["path"]] += 1
+    slug = _slug(plan.get("run") or (plan.get("base_sha") or "")[:8] or "run")
+    dels, prev = [], None
+    for g in groups:
+        branch = "dk/%s/%s" % (slug, _slug(g["name"]))
+        dels.append({"name": g["name"], "clusters": g["clusters"], "tags": g["tags"],
+                     "branch": branch, "base": prev or plan.get("base_sha") or "main",
+                     "layers": sorted(g["layers"]), "primary_files": len(g["files"])})
+        prev = branch
+    return dels, conflicts, auto_fired
 
 
 # ---------------------------------------------------------------- check
@@ -1288,6 +1374,19 @@ def compute_warnings(plan):
             warn("INTERFACE_NOT_FIRST", qid, "%s imports %s built in %s (L%d) but runs at L%d" % (
                 qid, ", ".join(sorted(set(fl))[:2]), cid, byc[cid]["layer"], byc[qid]["layer"]))
 
+    dels, dconflicts, dauto = compute_deliverables(plan)
+    plan["deliverables"] = dels
+    for cid, declared in sorted(dconflicts.items()):
+        warn("DELIVERABLE_CONFLICT", cid, "%s: WUs declare different deliverables (%s); assigned '%s'" % (
+            cid, ", ".join(declared), declared[0]))
+    if dauto and len(dels) > 1:
+        warn("AUTO_DELIVERABLES", "", "no WU declared 'delivers'; auto-split into %d deliverables by directory prefix (%s) — review the split" % (
+            len(dels), ", ".join(d["name"] for d in dels)))
+    for d in dels:
+        if d["primary_files"] > DELIVER_OVERSIZE_FILES:
+            warn("DELIVERABLE_OVERSIZE", "", "deliverable '%s' aggregates %d primary files (> %d): split it or justify in the report" % (
+                d["name"], d["primary_files"], DELIVER_OVERSIZE_FILES))
+
     g = plan.get("graph") or {}
     if g.get("used") and g.get("stale"):
         warn("GRAPH_STALE", "", "graphify graph built at %s, HEAD differs; community hints may be stale" % (
@@ -1407,6 +1506,13 @@ def render(plan, warnings):
         len(plan["layers"]), fmt_k(s.get("tokens", 0)), s.get("hops", "?"),
         " / %s" % fmt_usd(s["est_cost"]) if "est_cost" in s else "", srcs)
         + (" | isolation: worktree (run %s)" % plan.get("run", "?") if plan.get("isolation") == "worktree" else ""))
+    dels = plan.get("deliverables") or []
+    if dels:
+        lines.append("deliverables (review units; ship oldest-first):")
+        for i, d in enumerate(dels):
+            lines.append("  D%d %s [%s] %d primary files, L%s | branch %s <- %s" % (
+                i + 1, d["name"], ",".join(d["tags"]), d["primary_files"],
+                ",".join(str(x) for x in d["layers"]), d["branch"], d["base"]))
     for c in plan["clusters"]:
         lines.append("L%d %s %s %s  %df est %s/%dh%s tests:%d%s%s  %s" % (
             c["layer"], c["id"], c.get("commit_tag") or "[no-commit]", ",".join(c["wus"]), len(c["files"]),
@@ -1531,17 +1637,20 @@ def add_plan_args(p):
     p.add_argument("--run", default=None, metavar="NAME",
                    help="run id in branch names dk/<run>/<Wn> (default: first 8 chars of base_sha)")
     p.add_argument("--calibration", default=None, metavar="FILE",
-                   help="calibration.json to load (default <config>/delegate-kit/calibration.json if it exists)")
+                   help="calibration.json to load (default $KIMCHI_DK_DIR/calibration.json if it exists)")
     p.add_argument("--no-calibration", action="store_true", dest="no_calibration",
                    help="ignore calibration.json, use built-in defaults")
 
 
 def config_dir():
-    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    """The kit dir everything flows from: $KIMCHI_DK_DIR, else ~/.local/share/kimchi/delegate-kit."""
+    return os.environ.get("KIMCHI_DK_DIR") or os.path.join(
+        os.path.expanduser("~"), ".local", "share", "kimchi", "delegate-kit"
+    )
 
 
 def calibration_path():
-    return os.path.join(config_dir(), "delegate-kit", "calibration.json")
+    return os.path.join(config_dir(), "calibration.json")
 
 
 def clamp_calib(k, v):
@@ -1834,6 +1943,10 @@ def cmd_check(a):
         else:
             aw, n, t = check_after(plan, base, root)
             print("after: %d commit(s) since %s, %d tagged" % (n, base[:8], t))
+            dels = plan.get("deliverables") or []
+            if dels:
+                print("deliverables: " + ", ".join("%s(%s) -> %s" % (
+                    d["name"], ",".join(d["tags"]), d["branch"]) for d in dels))
             print(dump_warnings_only(aw) if aw else "after: no collisions, unplanned files or untagged commits")
 
 
@@ -1945,7 +2058,7 @@ def cmd_worktrees(a):
             if branch_exists(root, branch):
                 rc, _, err = git_run(["worktree", "add", path, branch], root)
             else:
-                rc, _, err = git_run(["worktree", "add", "-b", branch, path, start], root)
+                rc, _, err = git_run(["worktree", "add", "-b", branch, path, start + "^{commit}"], root)
             if rc != 0:
                 die("git worktree add failed for %s: %s" % (c["id"], err.strip()[:300]))
             existing = worktree_list(root)
@@ -2452,8 +2565,7 @@ def selftest():
     else:
         def git(cwd, *args):
             rc, out, err = git_run(list(args), cwd)
-            if rc != 0:
-                raise RuntimeError("git %s failed in %s: %s" % (" ".join(args), cwd, err.strip()))
+            eq("git %s in %s" % (" ".join(args), cwd), rc, 0)
             return out.strip()
 
         def put(cwd, name, text, append=False):
@@ -2512,7 +2624,8 @@ def selftest():
             rc, out = run_cmd(cmd_worktrees, plan=pf, layer=0, root=wts, repo=integ)
             eq("worktrees is idempotent", (rc, out.count("(exists)"), len(worktree_list(integ))), (0, 2, 3))
             eq("worktrees records the paths in the plan",
-               [c.get("worktree") for c in read_json(pf, "plan")["clusters"][:2]], [posix(c1), posix(c2)])
+               [c.get("worktree") for c in read_json(pf, "plan")["clusters"][:2]],
+               [posix(os.path.realpath(c1)), posix(os.path.realpath(c2))])
             eq("worktrees refuses a layer out of range", run_cmd(cmd_worktrees, plan=pf, layer=9, root=wts, repo=integ)[0], ("exit", 2))
             # both clusters append to the same Markdown file and to the WU-declared registry
             put(c1, "README.md", "from w1\n", append=True)
@@ -2626,7 +2739,7 @@ def main(argv=None):
                    help="bench.json file(s) from `bench PATH --json` (repeatable)")
     p.add_argument("--plan", nargs="+", action="extend", required=True,
                    help="partition.json file(s), repeatable (one for all benches, or one per bench)")
-    p.add_argument("--out", default="", help="default: <config>/delegate-kit/calibration.json")
+    p.add_argument("--out", default="", help="default: $KIMCHI_DK_DIR/calibration.json")
     p.set_defaults(fn=cmd_calibrate)
     p = sub.add_parser("show", help="compact view of one cluster (what a subagent reads)")
     p.add_argument("cluster")

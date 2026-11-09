@@ -1,0 +1,46 @@
+#!/bin/sh
+# dk - delegate-kit CLI, ported to Kimchi (lives at .kimchi/bin).
+# usage: dk <partition|squash|events|compose|git-guard> [args]
+# bench is deferred: it needs a Kimchi transcript adapter.
+
+DK_DIR="$(cd "$(dirname "$0")" && pwd)"
+DK_CORE="$DK_DIR/dk-core"
+
+# KIMCHI_DK_DIR: single base dir for calibration.json, state/, templates and the ledger.
+# An explicitly-set env var wins everywhere; this is the fallback default.
+if [ -z "$KIMCHI_DK_DIR" ]; then
+  KIMCHI_DK_DIR="$HOME/.local/share/kimchi/delegate-kit"
+  export KIMCHI_DK_DIR
+fi
+
+case "$1" in
+  ""|-h|--help)
+    echo "usage: dk <partition|squash|events|compose|git-guard> [args]"
+    echo "  partition   map/plan/check/show/worktrees/join/auto/calibrate (git+json work partitioner)"
+    echo "  squash      fold [Wn]-tagged commits into one commit per tag (git rebase -i)"
+    echo "  events      summarise the size-meter events.jsonl"
+    echo "  compose     adapt delegate-kit agent templates into a Kimchi agents dir"
+    echo "  git-guard   deny destructive git commands to subagents (scans argv words)"
+    echo "  bench       deferred: needs a Kimchi transcript adapter"
+    exit 0 ;;
+  bench)
+    echo "bench: deferred — needs a Kimchi transcript adapter"
+    exit 0 ;;
+  partition|squash|events|compose|git-guard) ;;
+  *)
+    echo "dk: unknown command '$1' (want partition|squash|events|compose|git-guard)" >&2
+    exit 2 ;;
+esac
+
+cmd=$1
+shift
+if [ "$cmd" = git-guard ]; then
+  script="$DK_CORE/git_guard.py"
+else
+  script="$DK_CORE/$cmd.py"
+fi
+if [ ! -f "$script" ]; then
+  echo "dk: $script is not installed" >&2
+  exit 2
+fi
+exec python3 "$script" "$@"

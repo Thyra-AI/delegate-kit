@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """events.py - summarise the size-meter event log.
 
-    sh ~/.claude/delegate-kit/bin/dk events [--since YYYY-MM-DD] [--last N] [--json] [--file PATH]
+    dk events [--since YYYY-MM-DD] [--last N] [--json] [--file PATH]
 
-Reads <config>/delegate-kit/state/events.jsonl (one JSON line per nudge or deny, written by
-hooks/meter.py) and prints counts by role, by level, by day (UTC), and the last N events.
+Reads $KIMCHI_DK_DIR/state/events.jsonl (one JSON line per nudge or deny, written by a
+size-meter hook) and prints counts by role, by level, by day (UTC), and the last N events.
 
-Location: --file, else the kit dir this script is installed in (<config>/delegate-kit/bin/ ->
-<config>/delegate-kit), else $CLAUDE_CONFIG_DIR/delegate-kit, else ~/.claude/delegate-kit.
+Location: --file, else $KIMCHI_DK_DIR/state/events.jsonl. $KIMCHI_DK_DIR defaults to
+~/.local/share/kimchi/delegate-kit; the env var, when set, wins everywhere.
 Malformed lines and lines without a timestamp are skipped and counted as "skipped".
 A missing log is not an error: it prints zero events. A log that exists but cannot be read
 (permissions, a directory passed as --file) is an error.
@@ -26,15 +26,17 @@ import sys
 import tempfile
 
 
-def default_log(here=None):
-    """Installed kit (a `dk` launcher beside this script) -> its own state dir; a repo checkout -> the config dir."""
-    here = here or os.path.dirname(os.path.abspath(__file__))
-    if os.path.isfile(os.path.join(here, "dk")):
-        kit = os.path.dirname(here)
-    else:
-        cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(os.path.expanduser("~"), ".claude")
-        kit = os.path.join(cfg, "delegate-kit")
-    return os.path.join(kit, "state", "events.jsonl")
+def kit_dir():
+    """The kit dir: $KIMCHI_DK_DIR, else the ~/.local/share/kimchi/delegate-kit default."""
+    env = os.environ.get("KIMCHI_DK_DIR", "").strip()
+    if env:
+        return env
+    return os.path.join(os.path.expanduser("~"), ".local", "share", "kimchi", "delegate-kit")
+
+
+def default_log():
+    """$KIMCHI_DK_DIR/state/events.jsonl (the --file default)."""
+    return os.path.join(kit_dir(), "state", "events.jsonl")
 
 
 def load(path, since=None):
@@ -140,13 +142,21 @@ def selftest():
             pass
         with contextlib.redirect_stderr(io.StringIO()):
             check("main directory file", main(["--file", d]) == 1)
-        kit = os.path.join(d, "kit")
-        os.makedirs(os.path.join(kit, "bin"))
-        installed = default_log(os.path.join(kit, "bin"))
-        check("checkout uses config dir", installed != os.path.join(kit, "state", "events.jsonl"))
-        with open(os.path.join(kit, "bin", "dk"), "w") as fh:
-            fh.write("")
-        check("installed uses own state", default_log(os.path.join(kit, "bin")) == os.path.join(kit, "state", "events.jsonl"))
+        old = os.environ.get("KIMCHI_DK_DIR")
+        os.environ["KIMCHI_DK_DIR"] = os.path.join(d, "kit")
+        try:
+            check("env var respected", default_log() == os.path.join(d, "kit", "state", "events.jsonl"))
+        finally:
+            if old is None:
+                os.environ.pop("KIMCHI_DK_DIR", None)
+            else:
+                os.environ["KIMCHI_DK_DIR"] = old
+        gone = os.environ.pop("KIMCHI_DK_DIR", None)
+        try:
+            check("default fallback path", default_log().endswith(os.path.join("kimchi", "delegate-kit", "state", "events.jsonl")))
+        finally:
+            if gone is not None:
+                os.environ["KIMCHI_DK_DIR"] = gone
         check("render", "total: 4 (skipped 3 malformed)" in render(s, p, sk))
     if failures:
         print("FAIL: " + ", ".join(failures))

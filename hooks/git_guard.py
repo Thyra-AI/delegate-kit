@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""PreToolUse hook (matcher: Bash|PowerShell) - deny destructive git commands and all pushes to subagents.
+"""git_guard - deny destructive git commands to subagents (standalone, tool-agnostic).
 
-Reads the hook JSON on stdin. Acts only when the input carries an `agent_id`
-(i.e. the call comes from a subagent); the user's own session is never touched.
-On a match it prints a permissionDecision=deny JSON and exits 0. Anything else
-(any other command, parse error, crash) prints nothing and exits 0: pass-through,
-no decision, so the normal permission flow applies. This hook never grants permission.
+Kimchi port of the delegate-kit git-guard, without Claude-specific hook or tool
+names (the PreToolUse payload and the dedicated PowerShell tool are gone; any shell
+tool's text is scanned the same way).
 
-Pure regex/lexing, stdlib only, no git subprocess. This is a guardrail against
-habitual commands, not a sandbox: `python -c "subprocess..."` bypasses it.
+    python3 git_guard.py -- <command...>    # 0 = pass-through (not blocked), 1 = blocked
+    python3 git_guard.py --selftest         # exits non-zero on any mismatch
 
-Main-session context meter: when the call has no `agent_id` and nothing was denied, this hook also
-asks meter.py (same directory) for a main-agent nudge and, if there is one, emits it as a PreToolUse
-pass-through `additionalContext` (no permission decision). The guard decision is computed and
-serialized FIRST; the meter runs inside try/except and can never change a deny or raise. Set
-`meter.main.enabled: false` in ~/.claude/delegate-kit/config.json to turn it off.
-
-    python git_guard.py --selftest      # exits non-zero on any mismatch
+Scans the raw argv words for blocked git operations: stash / restore / clean / rebase /
+checkout / switch / filter-branch / filter-repo; reset --hard/--merge; commit --amend;
+forced branch delete/move; `git add -A` / `-u` / `--all` / `.` / `:/` / `*`; and any push.
+Command substitutions (`$(...)`), backticks, heredocs, and nested shell scripts
+(sh -c / bash -c / eval / any shell tool, including powershell and cmd) are re-scanned
+the same way. Pure regex/lexing, stdlib only, no git subprocess. This is a guardrail
+against habitual commands, not a sandbox: `python -c "subprocess..."` bypasses it.
 """
 import base64
 import binascii
@@ -460,20 +458,6 @@ def check_command(cmd, depth=0, ps=False):
     return None
 
 
-def evaluate(payload):
-    """Hook payload dict -> deny reason or None."""
-    if not isinstance(payload, dict) or not payload.get("agent_id"):
-        return None  # main session (or unknown): never interfere
-    tool = payload.get("tool_name")
-    if tool not in (None, "Bash", "PowerShell"):
-        return None
-    tin = payload.get("tool_input")
-    cmd = tin.get("command") if isinstance(tin, dict) else None
-    if not isinstance(cmd, str):
-        return None
-    return check_command(cmd, ps=(tool == "PowerShell"))
-
-
 # ---------------------------------------------------------------- selftest
 
 PASS = [
@@ -519,7 +503,7 @@ PASS = [
     "timeout 5 echo git stash",
     "nice -n 5 echo git stash",
     "timeout 5 ls",
-    "sh ~/.claude/delegate-kit/bin/dk squash --plan schedule.json",
+    "sh $KIMCHI_DK_DIR/bin/dk squash --plan schedule.json",
     "python3 bin/check.py 2>&1",
     "git commit -F - <<'EOF'\ngit stash and git reset --hard are banned\nEOF",
     "git commit -m \"$(cat <<'EOF'\n[W2] add thing\n\ngit checkout is denied\nEOF\n)\"",
@@ -670,312 +654,71 @@ def _enc(script):
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-def _ps(cmd, tool="PowerShell", **kw):
-    d = {"tool_name": tool, "tool_input": {"command": cmd}}
-    d.update(kw)
-    return d
-
-
-PAYLOADS = [
-    # (payload, expect_deny)
-    ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "git -C . stash"}}, True),
-    ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "git add a.py"}}, False),
-    ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "git push origin main"}}, True),
-    ({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}, False),  # main session
-    ({"tool_name": "Bash", "tool_input": {"command": "git stash"}}, False),  # main session
-    ({"agent_id": "", "tool_name": "Bash", "tool_input": {"command": "git stash"}}, False),
-    ({"agent_id": "a1", "tool_name": "Read", "tool_input": {"command": "git stash"}}, False),
-    ({"agent_id": "a1", "tool_name": "Bash", "tool_input": {}}, False),
-    ({"agent_id": "a1", "tool_name": "Bash", "tool_input": None}, False),
-    ([], False),
-    # PowerShell tool: same guard, PowerShell lexing
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git push origin main"}}, True),
-    ({"tool_name": "PowerShell", "tool_input": {"command": "git push origin main"}}, False),  # main session
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git status; git push"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git status && git stash"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git status | Select-Object -First 3"}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "& git push"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "& \"C:\\Program Files\\Git\\bin\\git.exe\" push"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "C:\\Git\\bin\\git.exe stash"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git `push origin main"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git reset --hard HEAD~1"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Write-Host \"$(git push)\""}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Write-Host $(git push)"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "iex \"git push\""}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Invoke-Expression 'git stash'"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "powershell -Command \"git push\""}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "bash -c 'git push'"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git add -A"}}, True),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git add src\\a.py"}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git add .\\src\\a.py"}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Get-ChildItem C:\\Git\\bin"}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Select-String \"git push\" docs\\x.md"}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git commit -m \"fix git push docs\""}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git commit -m \"say `\"git push`\"\""}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "git commit -m @'\ngit push is banned\ngit stash too\n'@"}}, False),
-    ({"agent_id": "a1", "tool_name": "PowerShell", "tool_input": {"command": "Write-Host 'git push'"}}, False),
-    ({"agent_id": "a1", "tool_name": "Write", "tool_input": {"command": "git push"}}, False),
-    # PowerShell -EncodedCommand (base64 UTF-16LE): decoded and rescanned; undecodable is denied
-    (_ps("powershell -EncodedCommand " + _enc("git push origin main"), agent_id="a1"), True),
-    (_ps("pwsh -enc " + _enc("git stash"), agent_id="a1"), True),
-    (_ps("powershell.exe -NoProfile -ec " + _enc("git push"), agent_id="a1"), True),
-    (_ps("powershell -e " + _enc("git reset --hard"), agent_id="a1"), True),
-    (_ps("POWERSHELL -ENCODEDC " + _enc("& git push"), agent_id="a1"), True),
-    (_ps("powershell -enc " + _enc("Write-Host $(git push)"), agent_id="a1"), True),
-    (_ps("powershell -enc " + _enc("powershell -Command 'git push'"), agent_id="a1"), True),
-    (_ps("powershell -enc " + _enc("git push"), tool="Bash", agent_id="a1"), True),
-    (_ps("powershell -enc " + _enc("git push").rstrip("="), agent_id="a1"), True),  # missing padding
-    (_ps("powershell -enc !!notbase64!!", agent_id="a1"), True),
-    (_ps("powershell -enc QQ==", agent_id="a1"), True),  # decodes to one byte: not UTF-16LE
-    (_ps("powershell -enc " + base64.b64encode(b"\xff\xfe\xfe\xdc").decode(), agent_id="a1"), True),  # lone surrogate
-    (_ps("powershell -enc " + _enc("git status"), agent_id="a1"), False),
-    (_ps("powershell -NoProfile -EncodedCommand " + _enc("Get-ChildItem; git log -5"), agent_id="a1"), False),
-    (_ps("powershell -enc " + _enc("Write-Host 'git push'"), agent_id="a1"), False),
-    (_ps("powershell -enc", agent_id="a1"), False),  # no value: nothing to run
-    (_ps("powershell -ExecutionPolicy Bypass -File x.ps1", agent_id="a1"), False),
-    (_ps("powershell -enc " + _enc("git push")), False),  # main session
-    (_ps("powershell -enc !!notbase64!!"), False),  # main session
-]
-
-
 def selftest():
-    bad = 0
-    total = 0
-    total += 1
-    if check_command("git push origin main") != PUSH_MESSAGE:
-        bad += 1
-        print("FAIL (push deny reason text)")
-    for cmd in PASS:
-        total += 1
-        r = check_command(cmd)
-        if r is not None:
-            bad += 1
-            print("FAIL (expected pass-through): %r -> %s" % (cmd, r))
-    for cmd in DENY:
-        total += 1
-        if check_command(cmd) is None:
-            bad += 1
-            print("FAIL (expected deny): %r" % (cmd,))
-    for payload, want in PAYLOADS:
-        total += 1
-        got = evaluate(payload) is not None
-        if got != want:
-            bad += 1
-            print("FAIL (payload, expected %s): %r" % ("deny" if want else "pass-through", payload))
-    n, b = selftest_meter()
-    total += n
-    bad += b
-    print("git_guard selftest: %d cases, %d failed" % (total, bad))
-    return 1 if bad else 0
-
-
-def _old_deny_bytes(reason):
-    """The deny line exactly as this hook wrote it before the meter existed (independent of deny_output)."""
-    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                              "permissionDecisionReason": reason}}) + "\n"
-
-
-def selftest_meter():
-    """Deny output is byte-identical whatever the meter does; subagents never reach the meter."""
-    global meter_nudge, _load_meter
-    real, real_loader, calls, bad, total = meter_nudge, _load_meter, [], 0, 0
-    main_ls = {"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "ls"}}
-
-    def boom(payload):
-        calls.append(payload)
-        raise RuntimeError("meter exploded")
-
-    def says(payload):
-        calls.append(payload)
-        return "delegate-kit context meter: test"
-
-    def silent(payload):
-        calls.append(payload)
-        return None
-
-    def bad_loader():
-        raise ImportError("no meter")
+    bad = total = 0
 
     def expect(ok, what):
         nonlocal bad, total
         total += 1
         if not ok:
             bad += 1
-            print("FAIL (meter): " + what)
+            print("FAIL: " + what)
 
-    try:
-        # 1. every deny case: output == the pre-meter bytes whatever the meter would say or do
-        denied = [(p, evaluate(p)) for p, want in PAYLOADS if want]
-        denied += [({"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": c}}, check_command(c))
-                   for c in DENY]
-        for impl in (real, silent, says, boom):
-            meter_nudge = impl
-            for payload, reason in denied:
-                expect(bool(reason) and handle(json.dumps(payload)) == _old_deny_bytes(reason),
-                       "deny bytes changed for %r" % (payload,))
-        _load_meter = bad_loader  # the real wrapper's own try/except, with the import failing
-        meter_nudge = real
-        for payload, reason in denied[:5]:
-            expect(handle(json.dumps(payload)) == _old_deny_bytes(reason), "deny changed when meter import fails")
-        expect(handle(json.dumps(main_ls)) == "", "pass-through changed when meter import fails")
-        _load_meter = real_loader
-        # 2. a raising meter leaves a main pass-through unchanged
-        meter_nudge = boom
-        expect(handle(json.dumps(main_ls)) == "", "raising meter must leave pass-through unchanged")
-        # 3. subagent payloads never call the meter
-        calls.clear()
-        meter_nudge = says
-        for payload in (
-            {"agent_id": "a1", "session_id": "s", "tool_name": "Bash", "tool_input": {"command": "git status"}},
-            {"agent_id": "a1", "session_id": "s", "tool_name": "Bash", "tool_input": {"command": "git push"}},
-            {"agent_id": "a1", "tool_name": "Read", "tool_input": {}},
-        ):
-            expect(handle(json.dumps(payload)) in ("", _old_deny_bytes(PUSH_MESSAGE)),
-                   "unexpected subagent output: %r" % (payload,))
-        expect(not calls, "meter was called for a subagent payload")
-        # 4. a main-session pass-through carries the nudge as PreToolUse additionalContext, no decision
-        got = handle(json.dumps(dict(main_ls, tool_input={"command": "git push"})))
-        out = json.loads(got)["hookSpecificOutput"] if got else {}
-        expect(out == {"hookEventName": "PreToolUse", "additionalContext": "delegate-kit context meter: test"}
-               and got.endswith("\n"), "main nudge output shape: %r" % got)
-        expect(len(calls) == 1, "meter should be called once for a main pass-through")
-        # 5. silent meter and junk input give no output
-        meter_nudge = silent
-        expect(handle(json.dumps(main_ls)) == "", "silent meter: empty output")
-        expect(handle("not json") == "" and handle("") == "" and handle("[]") == "", "junk input: empty output")
-        # 6. the real meter, end to end: kill switch off => nothing; a 250k-context transcript => nudge
-        meter_nudge = real
-        expect(_real_meter_roundtrip(), "real meter round trip through handle()")
-    finally:
-        meter_nudge, _load_meter = real, real_loader
-    return total, bad
-
-
-def _real_meter_roundtrip():
-    import tempfile
-
-    if not os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), "meter.py")):
-        return True
-    old = os.environ.get("CLAUDE_CONFIG_DIR")
-    with tempfile.TemporaryDirectory() as tmp:
-        os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "cfg")
-        try:
-            tp = os.path.join(tmp, "t.jsonl")
-            with open(tp, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"type": "assistant", "message": {
-                    "id": "m1", "model": "x", "usage": {"input_tokens": 10, "cache_read_input_tokens": 250000}}}) + "\n")
-            payload = {"session_id": "rt", "transcript_path": tp, "hook_event_name": "PreToolUse",
-                       "tool_name": "Bash", "tool_input": {"command": "ls"}}
-            first = handle(json.dumps(payload))
-            ctx = (json.loads(first).get("hookSpecificOutput") or {}).get("additionalContext", "") if first else ""
-            again = handle(json.dumps(payload))  # once per crossing
-            os.makedirs(os.path.join(tmp, "cfg", "delegate-kit"), exist_ok=True)
-            with open(os.path.join(tmp, "cfg", "delegate-kit", "config.json"), "w", encoding="utf-8") as fh:
-                json.dump({"meter": {"main": {"enabled": False}}}, fh)
-            payload["session_id"] = "rt2"
-            off = handle(json.dumps(payload))
-            return "context meter" in ctx and again == "" and off == ""
-        finally:
-            if old is None:
-                os.environ.pop("CLAUDE_CONFIG_DIR", None)
-            else:
-                os.environ["CLAUDE_CONFIG_DIR"] = old
+    for cmd in PASS:
+        r = check_command(cmd)
+        expect(r is None, "expected pass-through: %r -> %s" % (cmd, r))
+    for cmd in DENY:
+        r = check_command(cmd)
+        expect(r is not None, "expected deny: %r (got %r)" % (cmd, r))
+    # shell tool with -EncodedCommand (base64 UTF-16LE): decoded and rescanned
+    for cmd in (
+        "powershell -EncodedCommand " + _enc("git push origin main"),
+        "pwsh -enc " + _enc("git stash"),
+        "powershell.exe -NoProfile -ec " + _enc("git push"),
+        "powershell -e " + _enc("git reset --hard"),
+        "POWERSHELL -ENCODEDC " + _enc("& git push"),
+        "powershell -enc " + _enc("Write-Host $(git push)"),
+        "powershell -enc " + _enc("powershell -Command 'git push'"),
+        "powershell -enc " + _enc("git push").rstrip("="),
+        "powershell -enc !!notbase64!!",
+        "powershell -enc QQ==",
+    ):
+        expect(check_command(cmd) is not None, "expected encoded deny: %r" % (cmd[:40],))
+    for cmd in (
+        "powershell -enc " + _enc("git status"),
+        "powershell -NoProfile -EncodedCommand " + _enc("Get-ChildItem; git log -5"),
+        "powershell -enc " + _enc("Write-Host 'git push'"),
+        "powershell -enc",
+        "powershell -ExecutionPolicy Bypass -File x.ps1",
+    ):
+        expect(check_command(cmd) is None, "expected encoded pass: %r" % (cmd[:40],))
+    print("git_guard selftest: %d cases, %d failed" % (total, bad))
+    return 1 if bad else 0
 
 
 # -------------------------------------------------------------------- main
 
-def deny_output(reason):
-    return json.dumps(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }
-    ) + "\n"
-
-
-def nudge_output(text):
-    return json.dumps(
-        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}}
-    ) + "\n"
-
-
-def _load_meter():
-    """Import meter.py from this file's directory (lazy: only a main-session pass-through gets here).
-
-    Compiling meter.py costs ~10 ms per call, so its bytecode is cached under <config>/delegate-kit/pyc
-    (sys.pycache_prefix, even when PYTHONDONTWRITEBYTECODE is set) instead of beside the plugin files.
-    """
-    import importlib.util
-
-    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(os.path.expanduser("~"), ".claude")
-    old = (sys.pycache_prefix, sys.dont_write_bytecode)
-    try:
-        sys.pycache_prefix = os.path.join(cfg, "delegate-kit", "pyc")
-        sys.dont_write_bytecode = False
-        spec = importlib.util.spec_from_file_location(
-            "delegate_kit_meter", os.path.join(os.path.dirname(os.path.abspath(__file__)), "meter.py")
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    finally:
-        sys.pycache_prefix, sys.dont_write_bytecode = old
-
-
-def meter_nudge(payload):
-    """Main-agent nudge text for this payload, or None. Never raises."""
-    try:
-        return _load_meter().main_nudge(payload)
-    except Exception:
-        return None
-
-
-def handle(raw):
-    """Hook stdin text -> stdout text ('' = no decision). The deny is decided and serialized first."""
-    try:
-        payload = json.loads(raw) if raw.strip() else None
-        reason = evaluate(payload)
-        if reason:
-            return deny_output(reason)
-    except Exception:
-        return ""  # on error: no decision (pass-through)
-    if not isinstance(payload, dict) or payload.get("agent_id"):
-        return ""  # subagent (or unknown): the meter is never consulted
-    try:
-        text = meter_nudge(payload)
-        return nudge_output(text) if isinstance(text, str) and text else ""
-    except Exception:
-        return ""
-
-
 def main():
-    if "--selftest" in sys.argv[1:]:
+    argv = sys.argv[1:]
+    if "--selftest" in argv:
         try:
             return selftest()
         except Exception:
             import traceback
-
             traceback.print_exc()
             print("git_guard selftest: crashed")
-            return 1  # a crashing selftest must not look green
-    try:
-        raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        out = handle(raw)
-    except Exception:
-        return 0
-    if out:
-        sys.stdout.write(out)
-        sys.stdout.flush()
+            return 1
+    if argv[:1] == ["--"]:
+        argv = argv[1:]
+    if not argv:
+        print("usage: python3 git_guard.py -- <command...>", file=sys.stderr)
+        return 2
+    why = check_command(" ".join(argv))
+    if why:
+        print(why, file=sys.stderr)
+        return 1
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except SystemExit:
-        raise
-    except Exception:
-        sys.exit(0)
+    sys.exit(main())

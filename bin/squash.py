@@ -3,8 +3,8 @@
 
 Run once, at the very end of a partitioned run, from inside the repo:
 
-    sh ~/.claude/delegate-kit/bin/dk squash --plan schedule.json
-    sh ~/.claude/delegate-kit/bin/dk squash --base <sha> [--dry-run]
+    dk squash --plan schedule.json
+    dk squash --base <sha> [--dry-run]
 
 What it does (see .delegate-kit/plans/partition-0.8.0.md, section 2):
   1. base = --base / base_sha from --plan; if `@{upstream}` exists and is not an
@@ -210,6 +210,37 @@ def oneline(base):
 
 
 # --------------------------------------------------------------------------
+# self-test (in-memory: exercises the core folding logic, no repo required)
+# --------------------------------------------------------------------------
+
+def selftest():
+    def mk(sha, subject):
+        return {"sha": sha, "subject": subject}
+
+    steps, groups, unchanged = build_steps([
+        mk("a", "[W1] first"), mk("b", "[W1] second"), mk("c", "untagged"),
+        mk("d", "[W2] one"), mk("e", "[W2] two"),
+    ])
+    ok = (
+        not unchanged
+        and [s["action"] for s in steps] == ["pick", "fixup", "pick", "pick", "fixup"]
+        and [s["sha"] for s in steps] == ["a", "b", "c", "d", "e"]
+        and sorted(groups) == ["W1", "W2"]
+    )
+    # already one commit per tag -> nothing to fold
+    _, _, unchanged_one = build_steps([mk("a", "[W1] only")])
+    ok = ok and unchanged_one is True
+    # untagged-only history is left as-is
+    _, _, unchanged_bare = build_steps([mk("a", "plain commit")])
+    ok = ok and unchanged_bare is True
+    if ok:
+        out("squash selftest: ok")
+        return 0
+    err("squash selftest: FAIL")
+    return 1
+
+
+# --------------------------------------------------------------------------
 # main flow
 # --------------------------------------------------------------------------
 
@@ -347,8 +378,11 @@ def main(argv=None):
     ap.add_argument("--plan", help="schedule.json / partition.json holding top-level base_sha")
     ap.add_argument("--dry-run", action="store_true", help="print the rebase todo only")
     ap.add_argument("--write-todo", metavar="PLANFILE", help=argparse.SUPPRESS)
+    ap.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("todo", nargs="?", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.selftest:
+        return selftest()
     if args.write_todo:
         if not args.todo:
             err("squash: --write-todo needs the todo file")
